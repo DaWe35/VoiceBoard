@@ -8,7 +8,9 @@ will open the stream at a supported rate and resample to 24 kHz on
 the fly so the downstream transcriber always receives 24 kHz PCM16.
 """
 
+import contextlib
 import logging
+import os
 from typing import Callable, Optional
 
 import numpy as np
@@ -17,8 +19,22 @@ import sounddevice as sd
 log = logging.getLogger(__name__)
 
 # Rates to try when the desired rate is rejected by the device,
-# ordered by preference (multiples of 24 kHz first for cleaner resampling).
-_FALLBACK_RATES = [48000, 44100, 16000, 8000]
+# ordered by preference (multiples of the target first for cleaner resampling).
+_FALLBACK_RATES = [48000, 44100, 24000, 16000, 8000]
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    """Temporarily redirect stderr to /dev/null to silence noisy PortAudio/ALSA messages."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        yield
+    finally:
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
 
 
 def _resample_linear(data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -78,7 +94,8 @@ class AudioRecorder:
         blocksize = int(self._device_rate * 0.1)  # 100 ms worth of frames
 
         try:
-            self._stream = self._open_stream(self._device_rate, blocksize)
+            with _suppress_stderr():
+                self._stream = self._open_stream(self._device_rate, blocksize)
         except sd.PortAudioError:
             log.warning(
                 "Device does not support %d Hz; trying fallback rates…",
@@ -87,23 +104,30 @@ class AudioRecorder:
             self._stream = None
 
             # Build a list of rates to try: device default first, then common rates
-            rates_to_try = list(_FALLBACK_RATES)
+            rates_to_try: list[int] = []
             try:
                 info = sd.query_devices(kind="input")
                 default_rate = int(info["default_samplerate"])  # type: ignore[index]
-                if default_rate not in rates_to_try:
-                    rates_to_try.insert(0, default_rate)
+                rates_to_try.append(default_rate)
             except Exception:
                 pass
+            for r in _FALLBACK_RATES:
+                if r not in rates_to_try:
+                    rates_to_try.append(r)
+
+            # Don't retry the rate that already failed
+            rates_to_try = [r for r in rates_to_try if r != self.sample_rate]
 
             for rate in rates_to_try:
                 try:
                     blocksize = int(rate * 0.1)
-                    self._stream = self._open_stream(rate, blocksize)
+                    with _suppress_stderr():
+                        self._stream = self._open_stream(rate, blocksize)
                     self._device_rate = rate
                     log.info("Opened audio stream at fallback rate %d Hz", rate)
                     break
                 except sd.PortAudioError:
+                    log.debug("Fallback rate %d Hz also not supported", rate)
                     continue
 
             if self._stream is None:
