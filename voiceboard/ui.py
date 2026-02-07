@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("VoiceBoard")
-        self.setMinimumSize(420, 580)
+        self.setMinimumSize(420, 680)
         self.setMaximumWidth(500)
         self.setWindowIcon(svg_to_icon(TRAY_ICON_SVG))
 
@@ -370,6 +370,27 @@ class MainWindow(QMainWindow):
         shortcut_group.setLayout(shortcut_layout)
         layout.addWidget(shortcut_group)
 
+        # ── Microphone ──
+        mic_group = QGroupBox("Microphone")
+        mic_layout = QFormLayout()
+        mic_layout.setSpacing(10)
+
+        self.mic_combo = QComboBox()
+        self.mic_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        mic_layout.addRow("Input device:", self.mic_combo)
+
+        self.mic_refresh_btn = QPushButton("🔄 Refresh")
+        self.mic_refresh_btn.setFixedWidth(100)
+        self.mic_refresh_btn.setStyleSheet("""
+            QPushButton { background-color: #2d2d4a; border-radius: 6px; padding: 8px; }
+            QPushButton:hover { background-color: #3d3d5a; }
+        """)
+        self.mic_refresh_btn.setCursor(Qt.PointingHandCursor)
+        mic_layout.addRow(self.mic_refresh_btn)
+
+        mic_group.setLayout(mic_layout)
+        layout.addWidget(mic_group)
+
         # ── Options ──
         options_group = QGroupBox("Options")
         options_layout = QFormLayout()
@@ -437,6 +458,33 @@ class MainWindow(QMainWindow):
         """Clear the live preview for a new speech turn."""
         self.live_preview.setText("")
 
+    def populate_mic_list(self, devices: list[dict], saved_device: str = "") -> None:
+        """Fill the microphone combo box with available input devices.
+
+        *devices* should come from :func:`audio.list_input_devices`.
+        *saved_device* is the ``input_device`` value from the config (a
+        string like ``"3"`` for device index 3, or ``""`` for default).
+        """
+        self.mic_combo.blockSignals(True)
+        self.mic_combo.clear()
+        self.mic_combo.addItem("System Default", userData="")
+        for dev in devices:
+            label = f"{dev['name']}  (#{dev['index']})"
+            self.mic_combo.addItem(label, userData=str(dev["index"]))
+
+        # Restore saved selection
+        if saved_device:
+            for i in range(self.mic_combo.count()):
+                if self.mic_combo.itemData(i) == saved_device:
+                    self.mic_combo.setCurrentIndex(i)
+                    break
+        self.mic_combo.blockSignals(False)
+
+    def selected_device_index(self) -> str:
+        """Return the device index string of the currently selected mic (\"\" = default)."""
+        data = self.mic_combo.currentData()
+        return data if data else ""
+
     def load_config(self, config) -> None:
         """Populate UI fields from config object."""
         self.api_key_input.setText(config.openai_api_key)
@@ -452,6 +500,7 @@ class MainWindow(QMainWindow):
         config.ptt_shortcut = self.ptt_input.text().strip()
         config.language = self.language_input.currentText().strip()
         config.start_minimized = self.start_minimized_cb.isChecked()
+        config.input_device = self.selected_device_index()
 
     def closeEvent(self, event) -> None:
         """Minimize to tray instead of quitting."""

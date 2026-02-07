@@ -22,6 +22,29 @@ log = logging.getLogger(__name__)
 TARGET_RATE = 24000
 
 
+def list_input_devices() -> list[dict]:
+    """Return a list of available audio input devices.
+
+    Each entry is a dict with keys ``index`` (int), ``name`` (str), and
+    ``channels`` (int).  Only devices that support at least one input
+    channel are included.
+    """
+    devices: list[dict] = []
+    try:
+        with _suppress_stderr():
+            all_devs = sd.query_devices()
+        for idx, dev in enumerate(all_devs):  # type: ignore[arg-type]
+            if dev.get("max_input_channels", 0) > 0:  # type: ignore[union-attr]
+                devices.append({
+                    "index": idx,
+                    "name": dev["name"],  # type: ignore[index]
+                    "channels": dev["max_input_channels"],  # type: ignore[index]
+                })
+    except Exception:
+        log.exception("Failed to enumerate audio input devices")
+    return devices
+
+
 @contextlib.contextmanager
 def _suppress_stderr():
     """Temporarily redirect stderr to /dev/null to silence noisy PortAudio/ALSA messages."""
@@ -57,8 +80,9 @@ def _resample_linear(data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
 class AudioRecorder:
     """Records audio from the microphone and streams 24 kHz PCM16 chunks."""
 
-    def __init__(self, channels: int = 1):
+    def __init__(self, channels: int = 1, device: Optional[int] = None):
         self.channels = channels
+        self.device: Optional[int] = device  # None = system default
         self._stream: Optional[sd.InputStream] = None
         self._recording = False
         self._device_rate: int = TARGET_RATE  # actual rate the device opened at
@@ -72,13 +96,18 @@ class AudioRecorder:
         return self._recording
 
     def start(self) -> None:
-        """Start recording audio from the default microphone."""
+        """Start recording audio from the selected (or default) microphone."""
         if self._recording:
             return
 
+        device = self.device  # None means system default
+
         # Query the device's preferred sample rate
         try:
-            info = sd.query_devices(kind="input")
+            if device is not None:
+                info = sd.query_devices(device)
+            else:
+                info = sd.query_devices(kind="input")
             device_rate = int(info["default_samplerate"])  # type: ignore[index]
         except Exception:
             device_rate = TARGET_RATE
@@ -89,6 +118,7 @@ class AudioRecorder:
                 blocksize = int(rate * 0.1)  # 100 ms
                 with _suppress_stderr():
                     self._stream = sd.InputStream(
+                        device=device,
                         samplerate=rate,
                         channels=self.channels,
                         dtype="int16",
@@ -98,7 +128,7 @@ class AudioRecorder:
                 self._device_rate = rate
                 break
             except sd.PortAudioError:
-                log.debug("Cannot open audio at %d Hz", rate)
+                log.debug("Cannot open audio at %d Hz on device %s", rate, device)
                 continue
         else:
             raise RuntimeError(

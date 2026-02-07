@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QTimer
 
 from voiceboard.config import AppConfig
-from voiceboard.audio import AudioRecorder
+from voiceboard.audio import AudioRecorder, list_input_devices
 from voiceboard.transcriber import RealtimeTranscriber
 from voiceboard.typer import type_text
 from voiceboard.hotkeys import HotkeyManager
@@ -39,6 +39,10 @@ class VoiceBoardApp:
         # Create main window
         self.window = MainWindow()
         self.window.load_config(self.config)
+
+        # Populate microphone list
+        self._refresh_mic_list()
+        self.window.mic_refresh_btn.clicked.connect(self._refresh_mic_list)
 
         # Create system tray
         self.tray = create_tray_icon(self.qt_app, self.window)
@@ -78,6 +82,11 @@ class VoiceBoardApp:
             self.window.show()
 
         return self.qt_app.exec()
+
+    def _refresh_mic_list(self) -> None:
+        """Re-scan audio input devices and update the UI dropdown."""
+        devices = list_input_devices()
+        self.window.populate_mic_list(devices, self.config.input_device)
 
     def _setup_hotkeys(self) -> None:
         """Configure and start global hotkey listener."""
@@ -123,6 +132,10 @@ class VoiceBoardApp:
         self.window.set_recording_state(True)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_RECORDING_SVG))
         self.tray.setToolTip("VoiceBoard — Recording...")
+
+        # Apply the currently selected microphone device
+        selected = self.window.selected_device_index()
+        self.recorder.device = int(selected) if selected else None
 
         # Start the realtime WebSocket transcription session
         self.transcriber.start()
