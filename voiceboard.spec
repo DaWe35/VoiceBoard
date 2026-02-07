@@ -2,17 +2,24 @@
 """PyInstaller spec file for VoiceBoard single-executable build."""
 
 import sys
+import certifi
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
+
+# Bundle SSL certificate authority bundle so HTTPS/WSS connections work
+_certifi_pem = certifi.where()
 
 a = Analysis(
     ['voiceboard/__main__.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        (_certifi_pem, 'certifi'),
+    ] + collect_data_files('certifi'),
     hiddenimports=[
         'PySide6.QtSvg',
+        'certifi',
         'pynput.keyboard._xorg',
         'pynput.keyboard._win32',
         'pynput.keyboard._darwin',
