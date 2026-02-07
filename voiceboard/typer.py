@@ -13,8 +13,6 @@ Text is injected in real-time as transcription deltas arrive.
 import logging
 import os
 import platform
-import re
-import subprocess
 import threading
 import time
 from typing import Optional
@@ -57,12 +55,16 @@ class _WaylandPortalTyper:
 
         try:
             import dbus  # type: ignore[import-untyped]
+            from dbus.mainloop.glib import DBusGMainLoop  # type: ignore[import-untyped]
         except ImportError:
             log.warning("dbus-python not installed — Wayland typing unavailable")
             return False
 
         try:
-            self._bus = dbus.SessionBus(private=True)
+            # Use the GLib main loop so we can receive D-Bus signals natively
+            # (no external dbus-monitor subprocess needed).
+            DBusGMainLoop(set_as_default=True)
+            self._bus = dbus.SessionBus()
             portal = self._bus.get_object(
                 "org.freedesktop.portal.Desktop",
                 "/org/freedesktop/portal/desktop",
@@ -78,67 +80,72 @@ class _WaylandPortalTyper:
                 f"/org/freedesktop/portal/desktop/session/{sender}/{session_token}"
             )
 
-            # Launch dbus-monitor to detect async Response signals
-            monitor = subprocess.Popen(
-                [
-                    "dbus-monitor", "--session",
-                    "type='signal',"
-                    "interface='org.freedesktop.portal.Request',"
-                    "member='Response'",
-                ],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
-            monitor_lines: list[str] = []
+            # Shared state for the async Response signal handler
+            response_event = threading.Event()
+            response_result: list[int] = []  # will hold the response code
 
-            def _read_monitor():
-                assert monitor.stdout is not None
-                for line in monitor.stdout:
-                    monitor_lines.append(line.strip())
+            def _on_response(response_code, results):
+                response_result.append(response_code)
+                response_event.set()
 
-            monitor_thread = threading.Thread(target=_read_monitor, daemon=True)
-            monitor_thread.start()
+            def _wait_for_response(request_path: str, timeout: float = 30) -> bool:
+                """Subscribe to the Response signal on *request_path* and block
+                until it fires or *timeout* seconds elapse.  Returns True if
+                the portal returned response code 0 (success)."""
+                response_event.clear()
+                response_result.clear()
+
+                self._bus.add_signal_receiver(
+                    _on_response,
+                    signal_name="Response",
+                    dbus_interface="org.freedesktop.portal.Request",
+                    path=request_path,
+                )
+
+                # Pump the GLib main loop until we get the signal or time out
+                from gi.repository import GLib  # type: ignore[import-untyped]
+                ctx = GLib.MainContext.default()
+                deadline = time.monotonic() + timeout
+                while not response_event.is_set() and time.monotonic() < deadline:
+                    # iterate(may_block=False) processes pending D-Bus messages
+                    ctx.iteration(False)
+                    time.sleep(0.05)
+
+                return bool(response_result and response_result[0] == 0)
 
             # ── CreateSession ──
-            self._rd.CreateSession({
+            create_handle = self._rd.CreateSession({
                 "handle_token": dbus.String(f"vb_{pid}"),
                 "session_handle_token": dbus.String(session_token),
             })
-            time.sleep(0.5)
+            request_path = str(create_handle)
+            if not _wait_for_response(request_path, timeout=5):
+                log.warning("RemoteDesktop CreateSession was not acknowledged")
+                self._session_path = None
+                return False
 
             # ── SelectDevices — keyboard only ──
-            self._rd.SelectDevices(
+            select_handle = self._rd.SelectDevices(
                 dbus.ObjectPath(self._session_path),
                 {
                     "handle_token": dbus.String(f"vb_sel_{pid}"),
                     "types": dbus.UInt32(1),  # 1 = keyboard
                 },
             )
-            time.sleep(0.5)
+            request_path = str(select_handle)
+            if not _wait_for_response(request_path, timeout=5):
+                log.warning("RemoteDesktop SelectDevices was not acknowledged")
+                self._session_path = None
+                return False
 
             # ── Start — may trigger a one-time permission dialog ──
-            self._rd.Start(
+            start_handle = self._rd.Start(
                 dbus.ObjectPath(self._session_path),
                 "",  # parent window
                 {"handle_token": dbus.String(start_token)},
             )
-
-            # Wait for the Start Response signal (up to 30 s for user approval)
-            deadline = time.monotonic() + 30
-            approved = False
-            while time.monotonic() < deadline:
-                full = "\n".join(monitor_lines)
-                if start_token in full and "uint32 0" in full:
-                    approved = True
-                    break
-                time.sleep(0.2)
-
-            monitor.terminate()
-            try:
-                monitor.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                monitor.kill()
-
-            if not approved:
+            request_path = str(start_handle)
+            if not _wait_for_response(request_path, timeout=30):
                 log.warning("RemoteDesktop portal Start was not approved (timeout)")
                 self._session_path = None
                 return False
