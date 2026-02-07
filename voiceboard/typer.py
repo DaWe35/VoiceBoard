@@ -88,6 +88,33 @@ class _WaylandPortalTyper:
                 response_result.append(response_code)
                 response_event.set()
 
+            # Load libglib-2.0 via ctypes to pump the D-Bus main loop.
+            # dbus.mainloop.glib already links against it, so it is always
+            # present — no PyGObject / gi dependency required.
+            import ctypes
+            import ctypes.util
+            _glib_name = ctypes.util.find_library("glib-2.0")
+            _glib = ctypes.CDLL(_glib_name) if _glib_name else None
+
+            def _pump_glib(timeout: float) -> None:
+                """Process pending GLib main-context events for *timeout* secs."""
+                if _glib is None:
+                    # Fallback: just sleep and hope the signal was delivered
+                    time.sleep(timeout)
+                    return
+                # g_main_context_default() → GMainContext*
+                _glib.g_main_context_default.restype = ctypes.c_void_p
+                ctx = _glib.g_main_context_default()
+                # g_main_context_iteration(ctx, may_block) → gboolean
+                _glib.g_main_context_iteration.argtypes = [ctypes.c_void_p, ctypes.c_int]
+                _glib.g_main_context_iteration.restype = ctypes.c_int
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    _glib.g_main_context_iteration(ctx, 0)  # non-blocking
+                    if response_event.is_set():
+                        break
+                    time.sleep(0.05)
+
             def _wait_for_response(request_path: str, timeout: float = 30) -> bool:
                 """Subscribe to the Response signal on *request_path* and block
                 until it fires or *timeout* seconds elapse.  Returns True if
@@ -102,14 +129,7 @@ class _WaylandPortalTyper:
                     path=request_path,
                 )
 
-                # Pump the GLib main loop until we get the signal or time out
-                from gi.repository import GLib  # type: ignore[import-untyped]
-                ctx = GLib.MainContext.default()
-                deadline = time.monotonic() + timeout
-                while not response_event.is_set() and time.monotonic() < deadline:
-                    # iterate(may_block=False) processes pending D-Bus messages
-                    ctx.iteration(False)
-                    time.sleep(0.05)
+                _pump_glib(timeout)
 
                 return bool(response_result and response_result[0] == 0)
 
