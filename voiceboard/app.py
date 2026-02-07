@@ -145,20 +145,22 @@ class VoiceBoardApp:
         self.transcriber.send_audio(pcm_bytes)
 
     def _on_transcription_delta(self, delta: str) -> None:
-        """Handle incremental transcription text — update live preview."""
+        """Handle incremental transcription text — type it in real-time
+        and update the live preview."""
         self.window.append_live_text(delta)
+        # Type each delta immediately into the focused input field
+        # (runs in a background thread so the Qt event loop isn't blocked)
+        threading.Thread(target=type_text, args=(delta,), daemon=True).start()
 
     def _on_turn_started(self) -> None:
         """A new speech turn was detected — reset the live preview."""
         self.window.reset_live_text()
 
     def _on_transcription_done(self, text: str) -> None:
-        """Handle completed transcription — type text into active field."""
+        """Handle completed transcription — update status bar."""
         self.window.signals.status_update.emit(
-            f"✅ Typed: \"{text[:60]}{'...' if len(text) > 60 else ''}\""
+            f"✅ \"{text[:60]}{'…' if len(text) > 60 else ''}\""
         )
-        # Type text in background to avoid blocking UI
-        threading.Thread(target=type_text, args=(text,), daemon=True).start()
 
     def _on_transcription_error(self, error: str) -> None:
         """Handle transcription error."""
