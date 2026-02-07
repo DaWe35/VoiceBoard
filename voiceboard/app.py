@@ -20,7 +20,7 @@ class VoiceBoardApp:
 
     def __init__(self):
         self.config = AppConfig.load()
-        self.recorder = AudioRecorder(sample_rate=self.config.sample_rate)
+        self.recorder = AudioRecorder()
         self.transcriber = RealtimeTranscriber(
             api_key=self.config.openai_api_key,
             model=self.config.model,

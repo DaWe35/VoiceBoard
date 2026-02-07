@@ -31,7 +31,6 @@ class AppConfig:
     language: str = ""
     start_minimized: bool = False
     auto_start: bool = False
-    sample_rate: int = 24000
     model: str = "gpt-4o-mini-transcribe"
 
     def save(self) -> None:

@@ -1,11 +1,11 @@
 """Audio recording module for VoiceBoard.
 
-Captures microphone audio at 24 kHz mono PCM16 and streams raw chunks
-to a callback (used to feed the Realtime API transcriber).
+Captures microphone audio and streams raw PCM16 chunks at 24 kHz mono
+to a callback (used to feed the OpenAI Realtime API transcriber).
 
-If the audio device does not support 24 kHz natively, the recorder
-will open the stream at a supported rate and resample to 24 kHz on
-the fly so the downstream transcriber always receives 24 kHz PCM16.
+The recorder always opens the device at its native/default sample rate
+and resamples to 24 kHz on the fly if needed, so it works with any
+hardware without manual configuration.
 """
 
 import contextlib
@@ -18,9 +18,8 @@ import sounddevice as sd
 
 log = logging.getLogger(__name__)
 
-# Rates to try when the desired rate is rejected by the device,
-# ordered by preference (multiples of the target first for cleaner resampling).
-_FALLBACK_RATES = [48000, 44100, 24000, 16000, 8000]
+# The OpenAI Realtime API requires 24 kHz PCM16 mono.
+TARGET_RATE = 24000
 
 
 @contextlib.contextmanager
@@ -50,21 +49,19 @@ def _resample_linear(data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
     dst_len = int(round(src_len * ratio))
     if dst_len == 0:
         return np.array([], dtype=np.int16)
-    # Work in float32 for interpolation, then convert back to int16
     indices = np.linspace(0, src_len - 1, dst_len)
     resampled = np.interp(indices, np.arange(src_len), data.astype(np.float32))
     return np.clip(resampled, -32768, 32767).astype(np.int16)
 
 
 class AudioRecorder:
-    """Records audio from the microphone and streams PCM16 chunks."""
+    """Records audio from the microphone and streams 24 kHz PCM16 chunks."""
 
-    def __init__(self, sample_rate: int = 24000, channels: int = 1):
-        self.sample_rate = sample_rate  # desired / output rate
+    def __init__(self, channels: int = 1):
         self.channels = channels
         self._stream: Optional[sd.InputStream] = None
         self._recording = False
-        self._device_rate: int = sample_rate  # actual device rate
+        self._device_rate: int = TARGET_RATE  # actual rate the device opened at
 
         # Callbacks
         self.on_audio_chunk: Optional[Callable[[bytes], None]] = None
@@ -74,74 +71,46 @@ class AudioRecorder:
     def is_recording(self) -> bool:
         return self._recording
 
-    def _open_stream(self, rate: int, blocksize: int) -> sd.InputStream:
-        """Try to open an InputStream at the given *rate*."""
-        return sd.InputStream(
-            samplerate=rate,
-            channels=self.channels,
-            dtype="int16",
-            callback=self._audio_callback,
-            blocksize=blocksize,
-        )
-
     def start(self) -> None:
         """Start recording audio from the default microphone."""
         if self._recording:
             return
 
-        # Determine a working sample rate
-        self._device_rate = self.sample_rate
-        blocksize = int(self._device_rate * 0.1)  # 100 ms worth of frames
-
+        # Query the device's preferred sample rate
         try:
-            with _suppress_stderr():
-                self._stream = self._open_stream(self._device_rate, blocksize)
-        except sd.PortAudioError:
-            log.warning(
-                "Device does not support %d Hz; trying fallback rates…",
-                self._device_rate,
-            )
-            self._stream = None
+            info = sd.query_devices(kind="input")
+            device_rate = int(info["default_samplerate"])  # type: ignore[index]
+        except Exception:
+            device_rate = TARGET_RATE
 
-            # Build a list of rates to try: device default first, then common rates
-            rates_to_try: list[int] = []
+        # Try the device's native rate first, then fall back to 24 kHz
+        for rate in dict.fromkeys([device_rate, TARGET_RATE]):
             try:
-                info = sd.query_devices(kind="input")
-                default_rate = int(info["default_samplerate"])  # type: ignore[index]
-                rates_to_try.append(default_rate)
-            except Exception:
-                pass
-            for r in _FALLBACK_RATES:
-                if r not in rates_to_try:
-                    rates_to_try.append(r)
+                blocksize = int(rate * 0.1)  # 100 ms
+                with _suppress_stderr():
+                    self._stream = sd.InputStream(
+                        samplerate=rate,
+                        channels=self.channels,
+                        dtype="int16",
+                        callback=self._audio_callback,
+                        blocksize=blocksize,
+                    )
+                self._device_rate = rate
+                break
+            except sd.PortAudioError:
+                log.debug("Cannot open audio at %d Hz", rate)
+                continue
+        else:
+            raise RuntimeError(
+                "Could not open an audio input stream. "
+                "Please check your microphone / audio device."
+            )
 
-            # Don't retry the rate that already failed
-            rates_to_try = [r for r in rates_to_try if r != self.sample_rate]
-
-            for rate in rates_to_try:
-                try:
-                    blocksize = int(rate * 0.1)
-                    with _suppress_stderr():
-                        self._stream = self._open_stream(rate, blocksize)
-                    self._device_rate = rate
-                    log.info("Opened audio stream at fallback rate %d Hz", rate)
-                    break
-                except sd.PortAudioError:
-                    log.debug("Fallback rate %d Hz also not supported", rate)
-                    continue
-
-            if self._stream is None:
-                raise RuntimeError(
-                    "Could not open an audio input stream at any supported sample rate. "
-                    "Please check your microphone / audio device."
-                )
-
-        need_resample = self._device_rate != self.sample_rate
-        if need_resample:
+        if self._device_rate != TARGET_RATE:
             log.info(
                 "Resampling audio from %d Hz → %d Hz",
                 self._device_rate,
-                self.sample_rate,
+                TARGET_RATE,
             )
 
         self._recording = True
@@ -164,9 +133,9 @@ class AudioRecorder:
 
         pcm = indata[:, 0] if indata.ndim > 1 else indata.ravel()
 
-        # Resample to the desired rate if the device rate differs
-        if self._device_rate != self.sample_rate:
-            pcm = _resample_linear(pcm, self._device_rate, self.sample_rate)
+        # Resample to 24 kHz if the device opened at a different rate
+        if self._device_rate != TARGET_RATE:
+            pcm = _resample_linear(pcm, self._device_rate, TARGET_RATE)
 
         # Send raw PCM16 bytes to the transcriber
         if self.on_audio_chunk:
