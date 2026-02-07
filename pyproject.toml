@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voiceboard"
+version = "1.0.0"
+description = "Cross-platform voice keyboard powered by OpenAI transcription"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "PySide6>=6.6.0",
+    "openai>=1.30.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    "pynput>=1.7.6",
+    "pyperclip>=1.8.2",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+voiceboard = "voiceboard.__main__:main"
+
+[project.gui-scripts]
+voiceboard-gui = "voiceboard.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["voiceboard*"]
