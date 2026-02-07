@@ -22,11 +22,27 @@ python -m voiceboard
 
 ## Build Single Executable
 
+PyInstaller must run **on** the target OS — it cannot cross-compile.
+
 ```bash
 pip install pyinstaller
 pyinstaller voiceboard.spec
-# Output: dist/VoiceBoard
+# Output: dist/VoiceBoard      (Linux/macOS)
+# Output: dist/VoiceBoard.exe  (Windows)
 ```
+
+### Build via GitHub Actions (all platforms)
+
+Push a version tag to trigger automated builds for Linux, Windows, and macOS:
+
+```bash
+git tag v1.0.0
+git push origin main --tags
+```
+
+This creates a GitHub Release with executables for all three platforms.
+
+Builds also run automatically on every push to `main` (artifacts downloadable from the Actions run page). You can trigger a build manually from the **Actions** tab → **Build Executables** → **Run workflow**.
 
 ## Usage
 

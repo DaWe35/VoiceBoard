@@ -1,0 +1,89 @@
+name: Build Executables
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+  workflow_dispatch:  # allows manual trigger from Actions tab
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: VoiceBoard-Linux
+          - os: windows-latest
+            artifact: VoiceBoard-Windows
+          - os: macos-latest
+            artifact: VoiceBoard-macOS
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Linux: install system deps for PySide6, dbus, and audio
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev pkg-config \
+            libegl1 libgl1-mesa-glx \
+            libportaudio2 libxcb-xinerama0 \
+            libxkbcommon0 libxcb-cursor0
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller voiceboard.spec
+
+      # Windows: rename to .exe
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          if (Test-Path "dist/VoiceBoard.exe") {
+            Copy-Item "dist/VoiceBoard.exe" "dist/${{ matrix.artifact }}.exe"
+          } else {
+            Copy-Item "dist/VoiceBoard" "dist/${{ matrix.artifact }}.exe"
+          }
+
+      # macOS/Linux: rename
+      - name: Rename artifact (Unix)
+        if: runner.os != 'Windows'
+        run: cp dist/VoiceBoard dist/${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
