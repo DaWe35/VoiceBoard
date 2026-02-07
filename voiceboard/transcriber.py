@@ -79,12 +79,17 @@ class RealtimeTranscriber:
         self._thread.start()
 
     def stop(self) -> None:
-        """Disconnect from the Realtime API."""
+        """Gracefully disconnect from the Realtime API."""
         self._running = False
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        # Close the WebSocket gracefully from the event-loop thread;
+        # this causes _listen() to exit and the `async with` block to
+        # clean up, so the session coroutine finishes naturally.
+        ws = self._ws
+        loop = self._loop
+        if ws is not None and loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._close_ws(ws), loop)
         if self._thread:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=5)
             self._thread = None
         self._ws = None
         self._loop = None
@@ -111,6 +116,14 @@ class RealtimeTranscriber:
 
     # ── Internal ────────────────────────────────────────────────
 
+    @staticmethod
+    async def _close_ws(ws) -> None:
+        """Close the WebSocket connection gracefully."""
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
     def _run_loop(self) -> None:
         """Entry point for the background event-loop thread."""
         self._loop = asyncio.new_event_loop()
@@ -118,9 +131,10 @@ class RealtimeTranscriber:
         try:
             self._loop.run_until_complete(self._session())
         except Exception as exc:
-            log.exception("Realtime session error")
-            if self.on_error:
-                self.on_error(str(exc))
+            if self._running:
+                log.exception("Realtime session error")
+                if self.on_error:
+                    self.on_error(str(exc))
         finally:
             self._running = False
             self._ws = None
@@ -147,9 +161,10 @@ class RealtimeTranscriber:
                 await self._listen(ws)
         except websockets.exceptions.ConnectionClosed as exc:
             if self._running:
-                log.warning("WebSocket closed: %s", exc)
+                log.warning("WebSocket closed unexpectedly: %s", exc)
                 if self.on_error:
                     self.on_error(f"Connection closed: {exc}")
+            # Otherwise this is an intentional close from stop() — ignore
         except Exception as exc:
             if self._running:
                 log.exception("WebSocket error")
