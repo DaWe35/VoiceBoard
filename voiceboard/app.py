@@ -48,7 +48,20 @@ class VoiceBoardApp:
 
         # Connect UI signals
         self.window.record_btn.clicked.connect(self._on_record_button)
-        self.window.save_btn.clicked.connect(self._on_save)
+
+        # Auto-save: debounce timer so rapid edits don't thrash disk
+        self._save_timer = QTimer()
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(500)  # 500 ms debounce
+        self._save_timer.timeout.connect(self._on_save)
+
+        # Connect every settings widget to trigger auto-save
+        self.window.api_key_input.textChanged.connect(self._schedule_save)
+        self.window.toggle_input.shortcut_changed.connect(self._schedule_save)
+        self.window.ptt_input.shortcut_changed.connect(self._schedule_save)
+        self.window.language_input.currentTextChanged.connect(self._schedule_save)
+        self.window.start_minimized_cb.stateChanged.connect(self._schedule_save)
+        self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)
 
         # Connect bridge signals (for thread-safe updates from hotkeys)
         self.window.signals.toggle_signal.connect(self._on_toggle)
@@ -139,7 +152,7 @@ class VoiceBoardApp:
         """Begin audio capture and realtime transcription."""
         if not self.config.openai_api_key:
             self.window.signals.status_update.emit(
-                "⚠️ Please set your OpenAI API key in Settings and save."
+                "⚠️ Please set your OpenAI API key in Settings."
             )
             return
 
@@ -207,8 +220,12 @@ class VoiceBoardApp:
         """Handle transcription error."""
         self.window.signals.status_update.emit(f"❌ Error: {error[:80]}")
 
+    def _schedule_save(self) -> None:
+        """Restart the debounce timer — auto-save will fire after the delay."""
+        self._save_timer.start()
+
     def _on_save(self) -> None:
-        """Save settings from UI to config file."""
+        """Save settings from UI to config file (called automatically on change)."""
         self.window.save_to_config(self.config)
         self.config.save()
 
@@ -219,5 +236,3 @@ class VoiceBoardApp:
         # Restart hotkeys with new shortcuts
         self.hotkeys.stop()
         self._setup_hotkeys()
-
-        self.window.signals.status_update.emit("✅ Settings saved!")

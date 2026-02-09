@@ -128,14 +128,6 @@ QPushButton:disabled {
     color: #666680;
 }
 
-QPushButton#saveBtn {
-    background-color: #4CAF50;
-}
-
-QPushButton#saveBtn:hover {
-    background-color: #5CBF60;
-}
-
 QCheckBox {
     color: #c0c0e0;
     spacing: 8px;
@@ -753,12 +745,6 @@ class MainWindow(QMainWindow):
 
         options_group.setLayout(options_layout)
         layout.addWidget(options_group)
-
-        # ── Save Button ──
-        self.save_btn = QPushButton("💾  Save Settings")
-        self.save_btn.setObjectName("saveBtn")
-        self.save_btn.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(self.save_btn)
 
         layout.addStretch()
 
