@@ -73,13 +73,25 @@ class RealtimeTranscriber:
                 self.on_error("OpenAI API key is not set. Please configure it in Settings.")
             return
 
+        # If a previous non-blocking stop() left a thread still winding
+        # down, wait briefly for it to finish before starting a new one.
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2)
+        self._thread = None
+
         self._running = True
         self._transcripts.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
-        """Gracefully disconnect from the Realtime API."""
+    def stop(self, blocking: bool = True) -> None:
+        """Gracefully disconnect from the Realtime API.
+
+        If *blocking* is True (the default), waits up to 5 s for the
+        background thread to finish.  Pass ``blocking=False`` when
+        calling from the GUI thread to avoid freezing the UI — the
+        background thread will clean up on its own.
+        """
         self._running = False
         # Close the WebSocket gracefully from the event-loop thread;
         # this causes _listen() to exit and the `async with` block to
@@ -88,11 +100,11 @@ class RealtimeTranscriber:
         loop = self._loop
         if ws is not None and loop is not None and loop.is_running():
             asyncio.run_coroutine_threadsafe(self._close_ws(ws), loop)
-        if self._thread:
+        if blocking and self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
-        self._ws = None
-        self._loop = None
+            self._ws = None
+            self._loop = None
 
     def send_audio(self, pcm_bytes: bytes) -> None:
         """Send a chunk of raw PCM16 audio (24 kHz, mono, little-endian).
@@ -138,6 +150,13 @@ class RealtimeTranscriber:
         finally:
             self._running = False
             self._ws = None
+            # Clean up the event loop so a future start() gets a fresh one
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+            self._loop = None
+            self._thread = None
 
     async def _session(self) -> None:
         """Connect, configure, and listen for events."""

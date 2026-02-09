@@ -272,7 +272,11 @@ class VoiceBoardApp:
         """Stop recording and disconnect from the Realtime API."""
         self._recording = False
         self.recorder.stop()
-        self.transcriber.stop()
+
+        # Signal the transcriber to close without blocking the GUI thread.
+        # The WebSocket close and thread cleanup happen in the background;
+        # the _run_loop finally-block resets _running / _ws on its own.
+        self.transcriber.stop(blocking=False)
 
         self.window.set_recording_state(False)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
