@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QMessageBox,
     QSizePolicy,
+    QStackedWidget,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QObject, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence
@@ -609,68 +610,46 @@ class SignalBridge(QObject):
     status_update = Signal(str)
 
 
-class MainWindow(QMainWindow):
-    """Main application window."""
+class SettingsPage(QWidget):
+    """Settings page containing all configuration controls."""
 
-    def __init__(self):
-        super().__init__()
-        self.signals = SignalBridge()
+    back_requested = Signal()  # emitted when the user wants to go back
+    opened = Signal()          # emitted when the page becomes visible
+    closed = Signal()          # emitted when the page is hidden
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setWindowTitle("VoiceBoard")
-        self.setMinimumSize(420, 680)
-        self.setMaximumWidth(500)
-        self.setWindowIcon(svg_to_icon(TRAY_ICON_SVG))
-
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
         layout.setSpacing(16)
         layout.setContentsMargins(24, 24, 24, 24)
 
-        # ── Header ──
-        header = QLabel("🎙️ VoiceBoard")
+        # ── Header with back button ──
+        header_row = QHBoxLayout()
+        self.back_btn = QPushButton("← Back")
+        self.back_btn.setFixedWidth(80)
+        self.back_btn.setCursor(Qt.PointingHandCursor)
+        self.back_btn.setStyleSheet("""
+            QPushButton { background-color: #2d2d4a; border-radius: 6px; padding: 8px; font-size: 13px; }
+            QPushButton:hover { background-color: #3d3d5a; }
+        """)
+        self.back_btn.clicked.connect(self.back_requested.emit)
+        header_row.addWidget(self.back_btn)
+
+        header = QLabel("⚙️ Settings")
+        header.setFont(QFont("Segoe UI", 18, QFont.Bold))
+        header.setStyleSheet("color: #6C63FF;")
         header.setAlignment(Qt.AlignCenter)
-        header.setFont(QFont("Segoe UI", 22, QFont.Bold))
-        header.setStyleSheet("color: #6C63FF; margin-bottom: 4px;")
-        layout.addWidget(header)
+        header_row.addWidget(header, 1)
 
-        subtitle = QLabel("Voice-to-text keyboard powered by OpenAI")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: #7070a0; font-size: 12px; margin-bottom: 8px;")
-        layout.addWidget(subtitle)
+        # Spacer to balance the back button
+        spacer = QWidget()
+        spacer.setFixedWidth(80)
+        header_row.addWidget(spacer)
 
-        # ── Record Button ──
-        btn_container = QHBoxLayout()
-        btn_container.setAlignment(Qt.AlignCenter)
-        self.record_btn = RecordButton()
-        btn_container.addWidget(self.record_btn)
-        layout.addLayout(btn_container)
-
-        # ── Audio Level ──
-        self.audio_level = AudioLevelWidget()
-        layout.addWidget(self.audio_level)
-
-        # ── Status ──
-        self.status_label = QLabel("Ready — press Start or use a shortcut")
-        self.status_label.setObjectName("statusLabel")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
-
-        # ── Live Transcription Preview ──
-        self.live_preview = QLabel("")
-        self.live_preview.setObjectName("livePreview")
-        self.live_preview.setAlignment(Qt.AlignCenter)
-        self.live_preview.setWordWrap(True)
-        self.live_preview.setMinimumHeight(40)
-        self.live_preview.setStyleSheet(
-            "color: #b0b0d0; font-size: 15px; font-style: italic; "
-            "padding: 8px; background-color: #16213e; border-radius: 8px;"
-        )
-        self.live_preview.hide()
-        layout.addWidget(self.live_preview)
+        layout.addLayout(header_row)
 
         # ── API Key ──
         api_group = QGroupBox("OpenAI API Key")
@@ -706,12 +685,14 @@ class MainWindow(QMainWindow):
 
         # ── Microphone ──
         mic_group = QGroupBox("Microphone")
-        mic_layout = QFormLayout()
+        mic_layout = QVBoxLayout()
         mic_layout.setSpacing(10)
 
+        form = QFormLayout()
         self.mic_combo = QComboBox()
         self.mic_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        mic_layout.addRow("Input device:", self.mic_combo)
+        form.addRow("Input device:", self.mic_combo)
+        mic_layout.addLayout(form)
 
         self.mic_refresh_btn = QPushButton("🔄 Refresh")
         self.mic_refresh_btn.setFixedWidth(100)
@@ -720,7 +701,14 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background-color: #3d3d5a; }
         """)
         self.mic_refresh_btn.setCursor(Qt.PointingHandCursor)
-        mic_layout.addRow(self.mic_refresh_btn)
+        mic_layout.addWidget(self.mic_refresh_btn)
+
+        # Audio level preview
+        level_label = QLabel("Level preview:")
+        level_label.setStyleSheet("color: #7070a0; font-size: 12px; margin-top: 4px;")
+        mic_layout.addWidget(level_label)
+        self.audio_level = AudioLevelWidget()
+        mic_layout.addWidget(self.audio_level)
 
         mic_group.setLayout(mic_layout)
         layout.addWidget(mic_group)
@@ -748,10 +736,6 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        # ── Connect signals ──
-        self.signals.audio_level.connect(self.audio_level.set_level)
-        self.signals.status_update.connect(self._set_status)
-
     def _toggle_key_visibility(self) -> None:
         if self.api_key_input.echoMode() == QLineEdit.Password:
             self.api_key_input.setEchoMode(QLineEdit.Normal)
@@ -760,40 +744,8 @@ class MainWindow(QMainWindow):
             self.api_key_input.setEchoMode(QLineEdit.Password)
             self.show_key_btn.setText("👁")
 
-    def _set_status(self, text: str) -> None:
-        self.status_label.setText(text)
-
-    def set_recording_state(self, recording: bool) -> None:
-        """Update UI to reflect recording state."""
-        self.record_btn.recording = recording
-        self.audio_level.recording = recording
-        if recording:
-            self.status_label.setProperty("recording", "true")
-            self.status_label.setText("🔴 Recording... speak now")
-            self.live_preview.setText("")
-            self.live_preview.show()
-        else:
-            self.status_label.setProperty("recording", "false")
-            self.live_preview.hide()
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
-
-    def append_live_text(self, delta: str) -> None:
-        """Append incremental transcription text to the live preview."""
-        current = self.live_preview.text()
-        self.live_preview.setText(current + delta)
-
-    def reset_live_text(self) -> None:
-        """Clear the live preview for a new speech turn."""
-        self.live_preview.setText("")
-
     def populate_mic_list(self, devices: list[dict], saved_device: str = "") -> None:
-        """Fill the microphone combo box with available input devices.
-
-        *devices* should come from :func:`audio.list_input_devices`.
-        *saved_device* is the ``input_device`` value from the config (a
-        string like ``"3"`` for device index 3, or ``""`` for default).
-        """
+        """Fill the microphone combo box with available input devices."""
         self.mic_combo.blockSignals(True)
         self.mic_combo.clear()
         self.mic_combo.addItem("System Default", userData="")
@@ -815,7 +767,7 @@ class MainWindow(QMainWindow):
         return data if data else ""
 
     def load_config(self, config) -> None:
-        """Populate UI fields from config object."""
+        """Populate settings fields from config object."""
         self.api_key_input.setText(config.openai_api_key)
         self.toggle_input.set_shortcut_string(config.toggle_shortcut)
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
@@ -823,13 +775,179 @@ class MainWindow(QMainWindow):
         self.start_minimized_cb.setChecked(config.start_minimized)
 
     def save_to_config(self, config) -> None:
-        """Write UI field values back to config object."""
+        """Write settings field values back to config object."""
         config.openai_api_key = self.api_key_input.text().strip()
         config.toggle_shortcut = self.toggle_input.shortcut_string()
         config.ptt_shortcut = self.ptt_input.shortcut_string()
         config.language = self.language_input.currentText().strip()
         config.start_minimized = self.start_minimized_cb.isChecked()
         config.input_device = self.selected_device_index()
+
+
+class MainWindow(QMainWindow):
+    """Main application window with a main page and a settings page."""
+
+    def __init__(self):
+        super().__init__()
+        self.signals = SignalBridge()
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        self.setWindowTitle("VoiceBoard")
+        self.setMinimumSize(320, 360)
+        self.setMaximumWidth(500)
+        self.setWindowIcon(svg_to_icon(TRAY_ICON_SVG))
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer_layout = QVBoxLayout(central)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        # ── Stacked widget for page switching ──
+        self._stack = QStackedWidget()
+        outer_layout.addWidget(self._stack)
+
+        # ── Page 0: Main page ──
+        main_page = QWidget()
+        layout = QVBoxLayout(main_page)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        # ── Header ──
+        header = QLabel("🎙️ VoiceBoard")
+        header.setAlignment(Qt.AlignCenter)
+        header.setFont(QFont("Segoe UI", 22, QFont.Bold))
+        header.setStyleSheet("color: #6C63FF; margin-bottom: 4px;")
+        layout.addWidget(header)
+
+        subtitle = QLabel("Voice-to-text keyboard powered by OpenAI")
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setStyleSheet("color: #7070a0; font-size: 12px; margin-bottom: 8px;")
+        layout.addWidget(subtitle)
+
+        # ── Record Button ──
+        btn_container = QHBoxLayout()
+        btn_container.setAlignment(Qt.AlignCenter)
+        self.record_btn = RecordButton()
+        btn_container.addWidget(self.record_btn)
+        layout.addLayout(btn_container)
+
+        # ── Status ──
+        self.status_label = QLabel("Ready — press Start or use a shortcut")
+        self.status_label.setObjectName("statusLabel")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        # ── Live Transcription Preview ──
+        self.live_preview = QLabel("")
+        self.live_preview.setObjectName("livePreview")
+        self.live_preview.setAlignment(Qt.AlignCenter)
+        self.live_preview.setWordWrap(True)
+        self.live_preview.setMinimumHeight(40)
+        self.live_preview.setStyleSheet(
+            "color: #b0b0d0; font-size: 15px; font-style: italic; "
+            "padding: 8px; background-color: #16213e; border-radius: 8px;"
+        )
+        self.live_preview.hide()
+        layout.addWidget(self.live_preview)
+
+        layout.addStretch()
+
+        # ── Settings Button ──
+        self.settings_btn = QPushButton("⚙️ Settings")
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d4a;
+                border-radius: 8px;
+                padding: 12px 20px;
+                font-size: 14px;
+                font-weight: bold;
+                color: #b0b0d0;
+            }
+            QPushButton:hover { background-color: #3d3d5a; color: #e0e0e0; }
+        """)
+        self.settings_btn.clicked.connect(self._show_settings)
+        layout.addWidget(self.settings_btn)
+
+        self._stack.addWidget(main_page)  # index 0
+
+        # ── Page 1: Settings page ──
+        self.settings_page = SettingsPage()
+        self.settings_page.back_requested.connect(self._show_main)
+        self._stack.addWidget(self.settings_page)  # index 1
+
+        # ── Expose settings widgets for backward compatibility ──
+        self.api_key_input = self.settings_page.api_key_input
+        self.toggle_input = self.settings_page.toggle_input
+        self.ptt_input = self.settings_page.ptt_input
+        self.language_input = self.settings_page.language_input
+        self.start_minimized_cb = self.settings_page.start_minimized_cb
+        self.mic_combo = self.settings_page.mic_combo
+        self.mic_refresh_btn = self.settings_page.mic_refresh_btn
+        self.audio_level = self.settings_page.audio_level
+
+        # ── Connect signals ──
+        self.signals.audio_level.connect(self.audio_level.set_level)
+        self.signals.status_update.connect(self._set_status)
+
+    def _show_settings(self) -> None:
+        """Switch to the settings page."""
+        self.setMinimumSize(420, 620)
+        self._stack.setCurrentIndex(1)
+        self.settings_page.opened.emit()
+
+    def _show_main(self) -> None:
+        """Switch back to the main page."""
+        self._stack.setCurrentIndex(0)
+        self.setMinimumSize(320, 360)
+        self.resize(self.minimumSize())
+        self.settings_page.closed.emit()
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+    def set_recording_state(self, recording: bool) -> None:
+        """Update UI to reflect recording state."""
+        self.record_btn.recording = recording
+        if recording:
+            self.status_label.setProperty("recording", "true")
+            self.status_label.setText("🔴 Recording... speak now")
+            self.live_preview.setText("")
+            self.live_preview.show()
+            # Switch to main page so the user sees the recording state
+            self._show_main()
+        else:
+            self.status_label.setProperty("recording", "false")
+            self.live_preview.hide()
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+
+    def append_live_text(self, delta: str) -> None:
+        """Append incremental transcription text to the live preview."""
+        current = self.live_preview.text()
+        self.live_preview.setText(current + delta)
+
+    def reset_live_text(self) -> None:
+        """Clear the live preview for a new speech turn."""
+        self.live_preview.setText("")
+
+    def populate_mic_list(self, devices: list[dict], saved_device: str = "") -> None:
+        """Fill the microphone combo box with available input devices."""
+        self.settings_page.populate_mic_list(devices, saved_device)
+
+    def selected_device_index(self) -> str:
+        """Return the device index string of the currently selected mic."""
+        return self.settings_page.selected_device_index()
+
+    def load_config(self, config) -> None:
+        """Populate UI fields from config object."""
+        self.settings_page.load_config(config)
+
+    def save_to_config(self, config) -> None:
+        """Write UI field values back to config object."""
+        self.settings_page.save_to_config(config)
 
     def closeEvent(self, event) -> None:
         """Minimize to tray instead of quitting."""

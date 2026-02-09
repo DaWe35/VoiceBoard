@@ -169,8 +169,9 @@ class VoiceBoardApp:
         # Setup hotkeys
         self._setup_hotkeys()
 
-        # Start microphone preview (level meter only, no transcription)
-        self._start_mic_preview()
+        # Start/stop microphone preview when settings page opens/closes
+        self.window.settings_page.opened.connect(self._on_settings_opened)
+        self.window.settings_page.closed.connect(self._on_settings_closed)
 
         # Show or minimize
         if self.config.start_minimized:
@@ -193,12 +194,24 @@ class VoiceBoardApp:
         """Restart the mic preview on the newly selected device."""
         if self._recording:
             return  # don't disrupt an active recording session
-        self._stop_mic_preview()
-        self._start_mic_preview()
+        # Only restart preview if the settings page is currently visible
+        if self.window._stack.currentIndex() == 1:
+            self._stop_mic_preview()
+            self._start_mic_preview()
 
     def _stop_mic_preview(self) -> None:
         """Stop the microphone preview stream."""
         self.recorder.stop_preview()
+
+    def _on_settings_opened(self) -> None:
+        """Start mic preview when the settings page is shown."""
+        if not self._recording:
+            self._start_mic_preview()
+
+    def _on_settings_closed(self) -> None:
+        """Stop mic preview when leaving the settings page."""
+        if not self._recording:
+            self._stop_mic_preview()
 
     def _refresh_mic_list(self) -> None:
         """Re-scan audio input devices and update the UI dropdown."""
@@ -281,9 +294,6 @@ class VoiceBoardApp:
         self.window.set_recording_state(False)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
         self.tray.setToolTip("VoiceBoard — Voice Keyboard")
-
-        # Restart mic preview so the level meter keeps showing
-        self._start_mic_preview()
 
     def _on_audio_chunk(self, pcm_bytes: bytes) -> None:
         """Forward audio chunk from the recorder to the transcriber."""
