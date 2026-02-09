@@ -48,6 +48,7 @@ class RealtimeTranscriber:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._draining = False  # True while waiting for final transcription after stop
 
         # Accumulate deltas per item_id for the completed transcript
         self._transcripts: dict[str, str] = {}
@@ -87,21 +88,32 @@ class RealtimeTranscriber:
     def stop(self, blocking: bool = True) -> None:
         """Gracefully disconnect from the Realtime API.
 
-        If *blocking* is True (the default), waits up to 5 s for the
+        Before closing, an ``input_audio_buffer.commit`` event is sent
+        so the server transcribes any remaining buffered audio.  The
+        WebSocket stays open briefly (drain phase) to receive the final
+        transcription deltas/completed events, then closes automatically.
+
+        If *blocking* is True (the default), waits up to 8 s for the
         background thread to finish.  Pass ``blocking=False`` when
         calling from the GUI thread to avoid freezing the UI — the
         background thread will clean up on its own.
         """
+        if not self._running and not self._draining:
+            return
+
         self._running = False
-        # Close the WebSocket gracefully from the event-loop thread;
-        # this causes _listen() to exit and the `async with` block to
-        # clean up, so the session coroutine finishes naturally.
+
+        # Tell the server to process whatever audio is still in its
+        # buffer, then enter the drain phase so _listen() keeps
+        # accepting the final transcription events.
         ws = self._ws
         loop = self._loop
         if ws is not None and loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._close_ws(ws), loop)
+            self._draining = True
+            asyncio.run_coroutine_threadsafe(self._commit_and_drain(ws), loop)
+
         if blocking and self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=8)
             self._thread = None
             self._ws = None
             self._loop = None
@@ -128,6 +140,28 @@ class RealtimeTranscriber:
 
     # ── Internal ────────────────────────────────────────────────
 
+    async def _commit_and_drain(self, ws) -> None:
+        """Commit the audio buffer and schedule a delayed close.
+
+        This tells the server to transcribe any remaining buffered
+        audio.  The ``_listen`` loop stays active during the drain
+        phase so that final delta / completed events are still
+        processed.  After a timeout the WebSocket is closed so the
+        session doesn't hang indefinitely.
+        """
+        try:
+            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        except Exception:
+            # Connection already gone — nothing to drain.
+            self._draining = False
+            return
+
+        # Give the server up to 5 s to deliver the remaining
+        # transcription, then force-close.
+        await asyncio.sleep(5)
+        self._draining = False
+        await self._close_ws(ws)
+
     @staticmethod
     async def _close_ws(ws) -> None:
         """Close the WebSocket connection gracefully."""
@@ -149,6 +183,7 @@ class RealtimeTranscriber:
                     self.on_error(str(exc))
         finally:
             self._running = False
+            self._draining = False
             self._ws = None
             # Clean up the event loop so a future start() gets a fresh one
             try:
@@ -216,9 +251,16 @@ class RealtimeTranscriber:
         await ws.send(json.dumps(session_update))
 
     async def _listen(self, ws) -> None:
-        """Process incoming server events."""
+        """Process incoming server events.
+
+        While ``_running`` is True we process everything.  Once
+        ``_running`` is False but ``_draining`` is True we keep
+        processing transcription events so the final words are not
+        lost.  The loop exits when both flags are False or the
+        WebSocket is closed by ``_commit_and_drain``.
+        """
         async for raw in ws:
-            if not self._running:
+            if not self._running and not self._draining:
                 break
             try:
                 event = json.loads(raw)
@@ -240,6 +282,13 @@ class RealtimeTranscriber:
                 transcript = event.get("transcript", "")
                 if transcript and self.on_completed:
                     self.on_completed(transcript.strip())
+                # If we are draining and the final transcript arrived,
+                # we can close immediately instead of waiting for the
+                # full drain timeout.
+                if self._draining and not self._running:
+                    self._draining = False
+                    await self._close_ws(ws)
+                    return
 
             elif etype == "input_audio_buffer.speech_started":
                 if self.on_turn_started:
