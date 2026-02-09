@@ -289,11 +289,20 @@ class RealtimeTranscriber:
 
         now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-        # How many non-final characters we previously typed that need correction
-        backspace_count = len(self._nonfinal_typed_text)
+        # The full replacement text: confirmed final text + new provisional text
+        full_new_text = final_text + nonfinal_text
 
-        # The new text to type: confirmed final text + new provisional text
-        new_text = final_text + nonfinal_text
+        # Compute minimal diff: find the common prefix between the
+        # previously typed nonfinal text and the new full text, so we
+        # only backspace/retype characters that actually changed.
+        old = self._nonfinal_typed_text
+        common = 0
+        limit = min(len(old), len(full_new_text))
+        while common < limit and old[common] == full_new_text[common]:
+            common += 1
+
+        backspace_count = len(old) - common
+        new_text = full_new_text[common:]
 
         if backspace_count > 0 or new_text:
             print(f"[{now}] bs={backspace_count} final='{final_text}' nonfinal='{nonfinal_text}'")
