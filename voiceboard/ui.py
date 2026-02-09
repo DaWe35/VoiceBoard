@@ -27,6 +27,31 @@ from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
 
 
+_REFRESH_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+  viewBox="0 0 24 24" fill="none" stroke="{color}"
+  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M21 2v6h-6"/>
+  <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+  <path d="M3 22v-6h6"/>
+  <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+</svg>"""
+
+
+def _make_refresh_icon(size: int = 24, color: str = "#b0b0d0") -> QIcon:
+    """Create a refresh icon from an SVG template."""
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtCore import QByteArray
+
+    svg = _REFRESH_ICON_SVG.replace("{color}", color)
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    renderer = QSvgRenderer(QByteArray(svg.encode()))
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def svg_to_icon(svg_str: str) -> QIcon:
     """Convert SVG string to QIcon."""
     pixmap = QPixmap(64, 64)
@@ -203,7 +228,7 @@ class RecordButton(QPushButton):
                     border-color: #FF8888;
                 }
             """)
-            self.setText("⏹ STOP")
+            self.setText("STOP")
         else:
             self.setStyleSheet("""
                 QPushButton {
@@ -219,7 +244,7 @@ class RecordButton(QPushButton):
                     border-color: #9B93FF;
                 }
             """)
-            self.setText("🎤 START")
+            self.setText("START")
 
 
 class AudioLevelWidget(QWidget):
@@ -636,7 +661,7 @@ class SettingsPage(QWidget):
         self.back_btn.clicked.connect(self.back_requested.emit)
         header_row.addWidget(self.back_btn)
 
-        header = QLabel("⚙️ Settings")
+        header = QLabel("Settings")
         header.setFont(QFont("Segoe UI", 18, QFont.Bold))
         header.setStyleSheet("color: #6C63FF;")
         header.setAlignment(Qt.AlignCenter)
@@ -687,19 +712,25 @@ class SettingsPage(QWidget):
         mic_layout.setSpacing(10)
 
         form = QFormLayout()
+        mic_row = QHBoxLayout()
         self.mic_combo = QComboBox()
         self.mic_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        form.addRow("Input device:", self.mic_combo)
-        mic_layout.addLayout(form)
+        mic_row.addWidget(self.mic_combo)
 
-        self.mic_refresh_btn = QPushButton("🔄 Refresh")
-        self.mic_refresh_btn.setFixedWidth(100)
+        self.mic_refresh_btn = QPushButton()
+        self.mic_refresh_btn.setIcon(_make_refresh_icon(24, "#b0b0d0"))
+        self.mic_refresh_btn.setIconSize(QSize(20, 20))
+        self.mic_refresh_btn.setFixedSize(36, 36)
+        self.mic_refresh_btn.setToolTip("Refresh device list")
         self.mic_refresh_btn.setStyleSheet("""
-            QPushButton { background-color: #2d2d4a; border-radius: 6px; padding: 8px; }
+            QPushButton { background-color: #2d2d4a; border-radius: 6px; padding: 4px; }
             QPushButton:hover { background-color: #3d3d5a; }
         """)
         self.mic_refresh_btn.setCursor(Qt.PointingHandCursor)
-        mic_layout.addWidget(self.mic_refresh_btn)
+        mic_row.addWidget(self.mic_refresh_btn)
+
+        form.addRow("Input device:", mic_row)
+        mic_layout.addLayout(form)
 
         # Audio level preview
         level_label = QLabel("Level preview:")
@@ -813,7 +844,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
 
         # ── Header ──
-        header = QLabel("🎙️ VoiceBoard")
+        header = QLabel("VoiceBoard")
         header.setAlignment(Qt.AlignCenter)
         header.setFont(QFont("Segoe UI", 22, QFont.Bold))
         header.setStyleSheet("color: #6C63FF; margin-bottom: 4px;")
@@ -857,7 +888,7 @@ class MainWindow(QMainWindow):
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(10)
 
-        self.settings_btn = QPushButton("⚙️ Settings")
+        self.settings_btn = QPushButton("Settings")
         self.settings_btn.setCursor(Qt.PointingHandCursor)
         self.settings_btn.setStyleSheet("""
             QPushButton {
@@ -873,7 +904,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.clicked.connect(self._show_settings)
         bottom_row.addWidget(self.settings_btn)
 
-        self.quit_btn = QPushButton("✕ Quit")
+        self.quit_btn = QPushButton("Quit")
         self.quit_btn.setCursor(Qt.PointingHandCursor)
         self.quit_btn.setStyleSheet("""
             QPushButton {
