@@ -62,6 +62,7 @@ class VoiceBoardApp:
         self.window.language_input.currentTextChanged.connect(self._schedule_save)
         self.window.start_minimized_cb.stateChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)
+        self.window.mic_combo.currentIndexChanged.connect(self._on_mic_changed)
 
         # Connect bridge signals (for thread-safe updates from hotkeys)
         self.window.signals.toggle_signal.connect(self._on_toggle)
@@ -106,6 +107,13 @@ class VoiceBoardApp:
             self.recorder.start_preview()
         except Exception:
             pass  # silently ignore — preview is non-critical
+
+    def _on_mic_changed(self) -> None:
+        """Restart the mic preview on the newly selected device."""
+        if self._recording:
+            return  # don't disrupt an active recording session
+        self._stop_mic_preview()
+        self._start_mic_preview()
 
     def _stop_mic_preview(self) -> None:
         """Stop the microphone preview stream."""
