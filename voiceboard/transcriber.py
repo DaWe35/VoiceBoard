@@ -15,6 +15,7 @@ import asyncio
 import datetime
 import json
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
@@ -269,6 +270,10 @@ class RealtimeTranscriber:
 
         for token in tokens:
             text = token.get("text", "")
+            if not text:
+                continue
+            # Strip Soniox control tokens (e.g. <end>, <fin>)
+            text = re.sub(r"<\w+>", "", text)
             if not text:
                 continue
             if token.get("is_final"):
