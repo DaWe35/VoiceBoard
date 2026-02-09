@@ -1,6 +1,13 @@
 # VoiceBoard
 
-Cross-platform voice keyboard powered by Soniox real-time transcription. Speak into your mic and have the text typed into any focused application.
+Cross-platform realtime voice keyboard. Speak into your mic and have the text typed into any focused application.
+
+Features:
+- Windows, macOS, Linux support (Wayland and X11 supported)
+- Plug-and-play. No dependencies required, it just works.
+- Real-time transcription (words appear as you speak)
+- Works well with any languages (not like Whisper)
+- Shortcuts for toggle and push-to-talk mode
 
 ## Development Setup
 
