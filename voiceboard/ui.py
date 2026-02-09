@@ -969,9 +969,17 @@ def create_tray_icon(app: QApplication, window: MainWindow) -> QSystemTrayIcon:
     menu.addAction(quit_action)
 
     tray.setContextMenu(menu)
-    tray.activated.connect(lambda reason: (
-        window.show() or window.raise_()
-    ) if reason == QSystemTrayIcon.DoubleClick else None)
+
+    def _on_tray_activated(reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            if window.isVisible() and not window.isMinimized():
+                window.hide()
+            else:
+                window.showNormal()
+                window.raise_()
+                window.activateWindow()
+
+    tray.activated.connect(_on_tray_activated)
     tray.setToolTip("VoiceBoard — Voice Keyboard")
     tray.show()
     return tray
