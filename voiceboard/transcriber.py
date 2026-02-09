@@ -2,10 +2,16 @@
 
 Uses the OpenAI Realtime API via WebSockets for streaming transcription.
 Audio is sent as PCM16 at 24 kHz and transcription deltas arrive in real-time.
+
+This module uses a **transcription session** (``type: "transcription"``)
+with server-side Voice Activity Detection (VAD) enabled.  The server
+automatically detects speech boundaries and commits audio for processing,
+so transcription deltas stream back as soon as the model starts decoding.
 """
 
 import asyncio
 import base64
+import datetime
 import json
 import logging
 import threading
@@ -27,15 +33,11 @@ REALTIME_SESSION_MODEL = "gpt-4o-mini-realtime-preview"
 class RealtimeTranscriber:
     """Streams audio to the OpenAI Realtime API and emits transcription events.
 
-    Server-side VAD is disabled; instead the audio buffer is committed
-    at regular intervals (``_COMMIT_INTERVAL`` seconds) so that
-    transcription deltas stream back while the user is still speaking.
+    Uses a transcription session with server-side VAD so that the server
+    automatically detects speech boundaries and begins transcribing as
+    soon as speech is detected.  Transcription deltas stream back in
+    real-time as the model decodes.
     """
-
-    # How often (seconds) to commit the audio buffer.  Shorter values
-    # give lower latency but produce more (smaller) transcription
-    # chunks; longer values are more efficient but feel less "live".
-    _COMMIT_INTERVAL = 1.0
 
     def __init__(
         self,
@@ -155,6 +157,9 @@ class RealtimeTranscriber:
         This tells the server to process whatever audio has been
         buffered so far, producing transcription deltas and eventually
         a ``completed`` event.  Safe to call from any thread.
+
+        With server VAD enabled the server commits automatically, but
+        this can be used to force a final commit when stopping.
         """
         if not self._running or self._ws is None or self._loop is None:
             return
@@ -216,13 +221,10 @@ class RealtimeTranscriber:
                 close_timeout=5,
             ) as ws:
                 self._ws = ws
-                # Send session.update to configure transcription
+                # Send session.update to configure transcription with server VAD
                 await self._configure_session(ws)
-                # Run the periodic commit loop alongside the listener
-                await asyncio.gather(
-                    self._listen(ws),
-                    self._commit_loop(ws),
-                )
+                # Only need the listener — server VAD handles commits
+                await self._listen(ws)
         except websockets.exceptions.ConnectionClosed as exc:
             if self._running:
                 log.warning("WebSocket closed unexpectedly: %s", exc)
@@ -236,13 +238,11 @@ class RealtimeTranscriber:
                     self.on_error(str(exc))
 
     async def _configure_session(self, ws) -> None:
-        """Send session.update to configure transcription-only mode.
+        """Send session.update to configure transcription with server VAD.
 
-        We disable server-side VAD (turn_detection=None) so that audio
-        is not buffered until the user pauses.  Instead we manually
-        commit the audio buffer at regular intervals (see
-        ``_commit_loop``) which lets the transcription model produce
-        deltas *while* the user is still speaking.
+        Server-side VAD automatically detects speech boundaries and
+        commits audio for processing, so transcription begins as soon
+        as speech is detected without needing manual commits.
         """
         transcription_cfg: dict = {
             "model": self._model,
@@ -256,30 +256,15 @@ class RealtimeTranscriber:
                 "modalities": ["text"],
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": transcription_cfg,
-                "turn_detection": None,
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                },
             },
         }
         await ws.send(json.dumps(session_update))
-
-    async def _commit_loop(self, ws) -> None:
-        """Periodically commit the audio buffer so transcription streams
-        while the user is still speaking.
-
-        Each commit triggers the server to process the buffered audio,
-        producing delta and completed events for that chunk.
-        """
-        while self._running:
-            await asyncio.sleep(self._COMMIT_INTERVAL)
-            if not self._running:
-                break
-            if not self._has_audio:
-                continue
-            try:
-                await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                self._has_audio = False
-                self._bytes_since_commit = 0
-            except Exception:
-                break  # connection gone
 
     async def _listen(self, ws) -> None:
         """Process incoming server events."""
@@ -297,24 +282,36 @@ class RealtimeTranscriber:
                 delta = event.get("delta", "")
                 item_id = event.get("item_id", "")
                 if delta:
+                    now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    print(f"[{now}] delta: {delta}")
                     self._transcripts.setdefault(item_id, "")
                     self._transcripts[item_id] += delta
                     if self.on_delta:
                         self.on_delta(delta)
 
             elif etype == "conversation.item.input_audio_transcription.completed":
-                # Each manual commit produces a completed event for that
-                # chunk.  We still forward it so the app layer can update
-                # the status bar, but the real "live" text comes from deltas.
                 transcript = event.get("transcript", "")
                 if transcript and self.on_completed:
+                    now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    print(f"[{now}] completed: {transcript}")
                     self.on_completed(transcript.strip())
 
             elif etype == "input_audio_buffer.speech_started":
-                # With server VAD disabled this won't fire, but keep it
-                # for robustness in case the config changes.
+                now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                print(f"[{now}] speech_started")
                 if self.on_turn_started:
                     self.on_turn_started()
+
+            elif etype == "input_audio_buffer.speech_stopped":
+                now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                print(f"[{now}] speech_stopped")
+
+            elif etype == "input_audio_buffer.committed":
+                # Server VAD auto-committed the buffer — reset our counter
+                self._bytes_since_commit = 0
+                self._has_audio = False
+                now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                print(f"[{now}] buffer committed")
 
             elif etype == "error":
                 err = event.get("error", {})
