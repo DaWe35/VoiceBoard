@@ -312,9 +312,13 @@ class VoiceBoardApp:
 
         *backspace_count* characters of previously typed non-final text are
         erased first, then *text* (final + new non-final) is typed.
+
+        Typing is skipped when the VoiceBoard window itself is focused to
+        avoid injecting keystrokes into our own UI (which can crash the app).
         """
         self.window.update_live_text(text, backspace_count)
-        enqueue_text(text, backspace_count)
+        if not self.window.isActiveWindow():
+            enqueue_text(text, backspace_count)
 
     def _on_transcription_error(self, error: str) -> None:
         """Handle transcription error."""
