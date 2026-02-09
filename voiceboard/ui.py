@@ -602,9 +602,7 @@ class SignalBridge(QObject):
     toggle_signal = Signal()
     ptt_press_signal = Signal()
     ptt_release_signal = Signal()
-    transcription_done = Signal(str)
-    transcription_delta = Signal(str)
-    transcription_turn_started = Signal()
+    transcription_text = Signal(str, int)  # (text, backspace_count)
     transcription_error = Signal(str)
     audio_level = Signal(float)
     status_update = Signal(str)
@@ -652,10 +650,10 @@ class SettingsPage(QWidget):
         layout.addLayout(header_row)
 
         # ── API Key ──
-        api_group = QGroupBox("OpenAI API Key")
+        api_group = QGroupBox("Soniox API Key")
         api_layout = QHBoxLayout()
         self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("sk-...")
+        self.api_key_input.setPlaceholderText("Enter your Soniox API key...")
         self.api_key_input.setEchoMode(QLineEdit.Password)
         api_layout.addWidget(self.api_key_input)
         self.show_key_btn = QPushButton("👁")
@@ -768,7 +766,7 @@ class SettingsPage(QWidget):
 
     def load_config(self, config) -> None:
         """Populate settings fields from config object."""
-        self.api_key_input.setText(config.openai_api_key)
+        self.api_key_input.setText(config.soniox_api_key)
         self.toggle_input.set_shortcut_string(config.toggle_shortcut)
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
         self.language_input.setCurrentText(config.language)
@@ -776,7 +774,7 @@ class SettingsPage(QWidget):
 
     def save_to_config(self, config) -> None:
         """Write settings field values back to config object."""
-        config.openai_api_key = self.api_key_input.text().strip()
+        config.soniox_api_key = self.api_key_input.text().strip()
         config.toggle_shortcut = self.toggle_input.shortcut_string()
         config.ptt_shortcut = self.ptt_input.shortcut_string()
         config.language = self.language_input.currentText().strip()
@@ -821,7 +819,7 @@ class MainWindow(QMainWindow):
         header.setStyleSheet("color: #6C63FF; margin-bottom: 4px;")
         layout.addWidget(header)
 
-        subtitle = QLabel("Voice-to-text keyboard powered by OpenAI")
+        subtitle = QLabel("Voice-to-text keyboard powered by Soniox")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: #7070a0; font-size: 12px; margin-bottom: 8px;")
         layout.addWidget(subtitle)
@@ -925,14 +923,12 @@ class MainWindow(QMainWindow):
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
 
-    def append_live_text(self, delta: str) -> None:
-        """Append incremental transcription text to the live preview."""
+    def update_live_text(self, text: str, backspace_count: int) -> None:
+        """Update the live preview — erase *backspace_count* chars then append *text*."""
         current = self.live_preview.text()
-        self.live_preview.setText(current + delta)
-
-    def reset_live_text(self) -> None:
-        """Clear the live preview for a new speech turn."""
-        self.live_preview.setText("")
+        if backspace_count > 0:
+            current = current[:-backspace_count] if backspace_count < len(current) else ""
+        self.live_preview.setText(current + text)
 
     def populate_mic_list(self, devices: list[dict], saved_device: str = "") -> None:
         """Fill the microphone combo box with available input devices."""

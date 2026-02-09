@@ -1,16 +1,17 @@
-"""Realtime OpenAI transcription module for VoiceBoard.
+"""Realtime Soniox transcription module for VoiceBoard.
 
-Uses the OpenAI Realtime API via WebSockets for streaming transcription.
-Audio is sent as PCM16 at 24 kHz and transcription deltas arrive in real-time.
+Uses the Soniox Speech-to-Text WebSocket API for streaming transcription.
+Audio is sent as PCM16 at 16 kHz mono and tokens arrive in real-time with
+``is_final`` flags indicating whether they are provisional or confirmed.
 
-This module uses a **transcription session** (``type: "transcription"``)
-with server-side Voice Activity Detection (VAD) enabled.  The server
-automatically detects speech boundaries and commits audio for processing,
-so transcription deltas stream back as soon as the model starts decoding.
+Non-final tokens are typed immediately for instant feedback.  When final
+tokens arrive, the previously typed non-final text is corrected (via
+backspaces) and replaced with the confirmed text.
+
+Reference: https://soniox.com/docs/stt/rt/real-time-transcription
 """
 
 import asyncio
-import base64
 import datetime
 import json
 import logging
@@ -22,49 +23,44 @@ import websockets.asyncio.client
 
 log = logging.getLogger(__name__)
 
-REALTIME_URL = "wss://api.openai.com/v1/realtime"
-
-# The Realtime API WebSocket URL requires a realtime-capable session model.
-# The transcription model (e.g. gpt-4o-mini-transcribe) is configured
-# separately inside session.update, not in the URL.
-REALTIME_SESSION_MODEL = "gpt-4o-mini-realtime-preview"
+SONIOX_WEBSOCKET_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
 
 class RealtimeTranscriber:
-    """Streams audio to the OpenAI Realtime API and emits transcription events.
+    """Streams audio to the Soniox STT API and emits transcription events.
 
-    Uses a transcription session with server-side VAD so that the server
-    automatically detects speech boundaries and begins transcribing as
-    soon as speech is detected.  Transcription deltas stream back in
-    real-time as the model decodes.
+    Tokens arrive with ``is_final`` flags:
+      - Non-final tokens are provisional — typed immediately but may change.
+      - Final tokens are confirmed — they replace the provisional text.
+
+    Callbacks:
+      - ``on_text(text, backspace_count)`` — type *text* after deleting
+        *backspace_count* characters of previously typed non-final text.
+      - ``on_error(msg)`` — an error occurred.
     """
 
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini-transcribe",
         language: str = "",
     ):
         self._api_key = api_key
-        self._model = model  # transcription model for session.update
         self._language = language
 
-        # Callbacks – set by the app layer
-        self.on_delta: Optional[Callable[[str], None]] = None
-        self.on_completed: Optional[Callable[[str], None]] = None
+        # Callbacks — set by the app layer
+        self.on_text: Optional[Callable[[str, int], None]] = None
         self.on_error: Optional[Callable[[str], None]] = None
-        self.on_turn_started: Optional[Callable[[], None]] = None
 
         # Internal state
         self._ws: Optional[websockets.asyncio.client.ClientConnection] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
-        self._has_audio = False  # True when audio has been appended since last commit
-        self._bytes_since_commit = 0  # PCM bytes appended since last commit
 
-        # Accumulate deltas per item_id for the completed transcript
-        self._transcripts: dict[str, str] = {}
+        # Track what non-final text has been typed so we can correct it.
+        # When final tokens arrive, we backspace over the non-final chars
+        # and retype the confirmed text.
+        self._nonfinal_typed_text: str = ""
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -79,12 +75,12 @@ class RealtimeTranscriber:
         return self._running and self._ws is not None
 
     def start(self) -> None:
-        """Open a Realtime transcription session in a background thread."""
+        """Open a Soniox transcription session in a background thread."""
         if self._running:
             return
         if not self._api_key:
             if self.on_error:
-                self.on_error("OpenAI API key is not set. Please configure it in Settings.")
+                self.on_error("Soniox API key is not set. Please configure it in Settings.")
             return
 
         # If a previous non-blocking stop() left a thread still winding
@@ -94,26 +90,19 @@ class RealtimeTranscriber:
         self._thread = None
 
         self._running = True
-        self._has_audio = False
-        self._bytes_since_commit = 0
-        self._transcripts.clear()
+        self._nonfinal_typed_text = ""
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
     def stop(self, blocking: bool = True) -> None:
-        """Gracefully disconnect from the Realtime API.
+        """Gracefully disconnect from the Soniox API.
 
         If *blocking* is True (the default), waits up to 8 s for the
         background thread to finish.  Pass ``blocking=False`` when
-        calling from the GUI thread to avoid freezing the UI — the
-        background thread will clean up on its own.
+        calling from the GUI thread to avoid freezing the UI.
         """
-
         self._running = False
 
-        # Close the WebSocket gracefully from the event-loop thread;
-        # this causes _listen() to exit and the `async with` block to
-        # clean up, so the session coroutine finishes naturally.
         ws = self._ws
         loop = self._loop
         if ws is not None and loop is not None and loop.is_running():
@@ -125,51 +114,43 @@ class RealtimeTranscriber:
             self._loop = None
 
     def send_audio(self, pcm_bytes: bytes) -> None:
-        """Send a chunk of raw PCM16 audio (24 kHz, mono, little-endian).
+        """Send a chunk of raw PCM16 audio (16 kHz, mono, little-endian).
 
         Safe to call from any thread.
         """
         if not self._running or self._ws is None or self._loop is None:
             return
 
-        b64 = base64.b64encode(pcm_bytes).decode("ascii")
-        event = {
-            "type": "input_audio_buffer.append",
-            "audio": b64,
-        }
         try:
             asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(event)), self._loop
+                self._ws.send(pcm_bytes), self._loop
             )
-            self._has_audio = True
-            self._bytes_since_commit += len(pcm_bytes)
         except Exception:
             pass  # connection may have closed
 
-    @property
-    def bytes_since_commit(self) -> int:
-        """Number of PCM bytes appended since the last commit."""
-        return self._bytes_since_commit
+    def finalize(self) -> None:
+        """Send a finalize message to force all pending tokens to become final.
 
-    def commit_audio(self) -> None:
-        """Manually commit the current audio buffer.
-
-        This tells the server to process whatever audio has been
-        buffered so far, producing transcription deltas and eventually
-        a ``completed`` event.  Safe to call from any thread.
-
-        With server VAD enabled the server commits automatically, but
-        this can be used to force a final commit when stopping.
+        Useful when stopping recording — ensures the last words are confirmed.
         """
         if not self._running or self._ws is None or self._loop is None:
             return
-        event = {"type": "input_audio_buffer.commit"}
+        msg = json.dumps({"type": "finalize"})
         try:
             asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(event)), self._loop
+                self._ws.send(msg), self._loop
             )
-            self._bytes_since_commit = 0
-            self._has_audio = False
+        except Exception:
+            pass
+
+    def send_eof(self) -> None:
+        """Signal end-of-audio to the server (empty string)."""
+        if not self._running or self._ws is None or self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._ws.send(""), self._loop
+            )
         except Exception:
             pass
 
@@ -191,13 +172,12 @@ class RealtimeTranscriber:
             self._loop.run_until_complete(self._session())
         except Exception as exc:
             if self._running:
-                log.exception("Realtime session error")
+                log.exception("Soniox session error")
                 if self.on_error:
                     self.on_error(str(exc))
         finally:
             self._running = False
             self._ws = None
-            # Clean up the event loop so a future start() gets a fresh one
             try:
                 self._loop.close()
             except Exception:
@@ -207,121 +187,114 @@ class RealtimeTranscriber:
 
     async def _session(self) -> None:
         """Connect, configure, and listen for events."""
-        url = f"{REALTIME_URL}?model={REALTIME_SESSION_MODEL}"
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
-
         try:
             async with websockets.asyncio.client.connect(
-                url,
-                additional_headers=headers,
+                SONIOX_WEBSOCKET_URL,
                 max_size=2**24,
                 close_timeout=5,
             ) as ws:
                 self._ws = ws
-                # Send session.update to configure transcription with server VAD
-                await self._configure_session(ws)
-                # Only need the listener — server VAD handles commits
+                # Send config as the first message
+                await self._send_config(ws)
+                # Listen for token responses
                 await self._listen(ws)
         except websockets.exceptions.ConnectionClosed as exc:
             if self._running:
                 log.warning("WebSocket closed unexpectedly: %s", exc)
                 if self.on_error:
                     self.on_error(f"Connection closed: {exc}")
-            # Otherwise this is an intentional close from stop() — ignore
         except Exception as exc:
             if self._running:
                 log.exception("WebSocket error")
                 if self.on_error:
                     self.on_error(str(exc))
 
-    async def _configure_session(self, ws) -> None:
-        """Send session.update to configure transcription with server VAD.
-
-        Server-side VAD automatically detects speech boundaries and
-        commits audio for processing, so transcription begins as soon
-        as speech is detected without needing manual commits.
-        """
-        transcription_cfg: dict = {
-            "model": self._model,
+    async def _send_config(self, ws) -> None:
+        """Send the initial configuration message to Soniox."""
+        config: dict = {
+            "api_key": self._api_key,
+            "model": "stt-rt-preview",
+            "audio_format": "pcm_s16le",
+            "sample_rate": 16000,
+            "num_channels": 1,
+            # Endpoint detection finalises tokens when the speaker pauses,
+            # which gives us confirmed text faster.
+            "enable_endpoint_detection": True,
         }
+
         if self._language:
-            transcription_cfg["language"] = self._language
+            config["language_hints"] = [self._language]
 
-        session_update = {
-            "type": "session.update",
-            "session": {
-                "modalities": ["text"],
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": transcription_cfg,
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
-                },
-            },
-        }
-        await ws.send(json.dumps(session_update))
+        await ws.send(json.dumps(config))
 
     async def _listen(self, ws) -> None:
-        """Process incoming server events."""
+        """Process incoming server responses (token streams)."""
         async for raw in ws:
             if not self._running:
                 break
             try:
-                event = json.loads(raw)
+                response = json.loads(raw)
             except json.JSONDecodeError:
                 continue
 
-            etype = event.get("type", "")
-
-            if etype == "conversation.item.input_audio_transcription.delta":
-                delta = event.get("delta", "")
-                item_id = event.get("item_id", "")
-                if delta:
-                    now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    print(f"[{now}] delta: {delta}")
-                    self._transcripts.setdefault(item_id, "")
-                    self._transcripts[item_id] += delta
-                    if self.on_delta:
-                        self.on_delta(delta)
-
-            elif etype == "conversation.item.input_audio_transcription.completed":
-                transcript = event.get("transcript", "")
-                if transcript and self.on_completed:
-                    now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    print(f"[{now}] completed: {transcript}")
-                    self.on_completed(transcript.strip())
-
-            elif etype == "input_audio_buffer.speech_started":
-                now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                print(f"[{now}] speech_started")
-                if self.on_turn_started:
-                    self.on_turn_started()
-
-            elif etype == "input_audio_buffer.speech_stopped":
-                now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                print(f"[{now}] speech_stopped")
-
-            elif etype == "input_audio_buffer.committed":
-                # Server VAD auto-committed the buffer — reset our counter
-                self._bytes_since_commit = 0
-                self._has_audio = False
-                now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                print(f"[{now}] buffer committed")
-
-            elif etype == "error":
-                err = event.get("error", {})
-                msg = err.get("message", str(err))
-                log.error("Realtime API error: %s", msg)
+            # Error from server
+            if response.get("error_code"):
+                msg = f"{response['error_code']} - {response.get('error_message', '')}"
+                log.error("Soniox API error: %s", msg)
                 if self.on_error:
                     self.on_error(msg)
+                continue
 
-            elif etype == "session.created":
-                log.info("Realtime session created: %s", event.get("session", {}).get("id"))
+            tokens = response.get("tokens")
+            if tokens:
+                self._process_tokens(tokens)
 
-            elif etype == "session.updated":
-                log.info("Realtime session configured")
+            # Session finished (server signals end of stream)
+            if response.get("finished"):
+                log.info("Soniox session finished")
+                break
+
+    def _process_tokens(self, tokens: list[dict]) -> None:
+        """Handle a batch of tokens from the server.
+
+        Strategy:
+        1. Collect final tokens and non-final tokens from this response.
+        2. Final tokens: backspace over previously typed non-final text,
+           then type the final text.  This "corrects" the provisional text.
+        3. Non-final tokens: type them as provisional feedback, remembering
+           what was typed so we can backspace later.
+        """
+        final_text_parts: list[str] = []
+        nonfinal_text_parts: list[str] = []
+
+        for token in tokens:
+            text = token.get("text", "")
+            if not text:
+                continue
+            if token.get("is_final"):
+                final_text_parts.append(text)
+            else:
+                nonfinal_text_parts.append(text)
+
+        final_text = "".join(final_text_parts)
+        nonfinal_text = "".join(nonfinal_text_parts)
+
+        if not final_text and not nonfinal_text:
+            return
+
+        now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+        # How many non-final characters we previously typed that need correction
+        backspace_count = len(self._nonfinal_typed_text)
+
+        # The new text to type: confirmed final text + new provisional text
+        new_text = final_text + nonfinal_text
+
+        if backspace_count > 0 or new_text:
+            print(f"[{now}] bs={backspace_count} final='{final_text}' nonfinal='{nonfinal_text}'")
+
+            if self.on_text:
+                self.on_text(new_text, backspace_count)
+
+        # Update tracking: only the non-final portion remains "provisional"
+        self._nonfinal_typed_text = nonfinal_text

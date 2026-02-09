@@ -97,13 +97,11 @@ class VoiceBoardApp:
         self.config = AppConfig.load()
         self.recorder = AudioRecorder()
         self.transcriber = RealtimeTranscriber(
-            api_key=self.config.openai_api_key,
-            model=self.config.model,
+            api_key=self.config.soniox_api_key,
             language=self.config.language,
         )
         self.hotkeys = HotkeyManager()
         self._recording = False
-        self._draining = False
 
     def run(self) -> int:
         """Run the application."""
@@ -150,9 +148,7 @@ class VoiceBoardApp:
         self.window.signals.toggle_signal.connect(self._on_toggle)
         self.window.signals.ptt_press_signal.connect(self._on_ptt_press)
         self.window.signals.ptt_release_signal.connect(self._on_ptt_release)
-        self.window.signals.transcription_done.connect(self._on_transcription_done)
-        self.window.signals.transcription_delta.connect(self._on_transcription_delta)
-        self.window.signals.transcription_turn_started.connect(self._on_turn_started)
+        self.window.signals.transcription_text.connect(self._on_transcription_text)
         self.window.signals.transcription_error.connect(self._on_transcription_error)
 
         # Audio level callback
@@ -162,10 +158,8 @@ class VoiceBoardApp:
         self.recorder.on_audio_chunk = self._on_audio_chunk
 
         # Transcriber callbacks — emit Qt signals for thread safety
-        self.transcriber.on_delta = lambda delta: self.window.signals.transcription_delta.emit(delta)
-        self.transcriber.on_completed = lambda text: self.window.signals.transcription_done.emit(text)
+        self.transcriber.on_text = lambda text, bs: self.window.signals.transcription_text.emit(text, bs)
         self.transcriber.on_error = lambda err: self.window.signals.transcription_error.emit(err)
-        self.transcriber.on_turn_started = lambda: self.window.signals.transcription_turn_started.emit()
 
         # Setup hotkeys
         self._setup_hotkeys()
@@ -238,12 +232,12 @@ class VoiceBoardApp:
         """Toggle recording on/off."""
         if self._recording:
             self._stop_recording()
-        elif not self._draining:
+        else:
             self._start_recording()
 
     def _on_ptt_press(self) -> None:
         """Push-to-talk: start recording on press."""
-        if not self._recording and not self._draining:
+        if not self._recording:
             self._start_recording()
 
     def _on_ptt_release(self) -> None:
@@ -253,9 +247,9 @@ class VoiceBoardApp:
 
     def _start_recording(self) -> None:
         """Begin audio capture and realtime transcription."""
-        if not self.config.openai_api_key:
+        if not self.config.soniox_api_key:
             self.window.signals.status_update.emit(
-                "⚠️ Please set your OpenAI API key in Settings."
+                "⚠️ Please set your Soniox API key in Settings."
             )
             return
 
@@ -282,65 +276,30 @@ class VoiceBoardApp:
         # Start capturing audio (chunks will be forwarded to the transcriber)
         self.recorder.start()
 
-    # Minimum PCM bytes for the final audio buffer before committing.
-    # 100 ms at 24 kHz mono PCM16 = 24000 * 0.1 * 2 = 4800 bytes.
-    _MIN_FINAL_BUFFER_BYTES = 4800
-
     def _stop_recording(self) -> None:
-        """Stop recording and disconnect from the Realtime API.
+        """Stop recording and disconnect from the Soniox API.
 
-        The recorder is kept alive briefly so that the last audio buffer
-        reaches at least 100 ms before the final commit — this avoids
-        sending a tiny, potentially unusable tail chunk to the API.
+        Sends a finalize message so the last non-final tokens are confirmed,
+        then signals end-of-audio and schedules cleanup.
         """
         self._recording = False
-        self._draining = True
 
         self.window.set_recording_state(False)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
         self.tray.setToolTip("VoiceBoard — Voice Keyboard")
 
-        # Check if we already have enough audio buffered since the last
-        # commit; if so, commit immediately, otherwise keep recording
-        # until we reach the minimum.
-        if self.transcriber.bytes_since_commit >= self._MIN_FINAL_BUFFER_BYTES:
-            self._drain_complete()
-        else:
-            # Poll every 20 ms until enough audio has been buffered.
-            self._drain_timer = QTimer()
-            self._drain_timer.setInterval(20)
-            self._drain_timer.timeout.connect(self._check_drain)
-            self._drain_timer.start()
-            # Safety timeout: stop draining after 500 ms regardless.
-            QTimer.singleShot(500, self._drain_complete)
-
-    def _check_drain(self) -> None:
-        """Poll until the audio buffer has reached the minimum size."""
-        if not self._draining:
-            return
-        if self.transcriber.bytes_since_commit >= self._MIN_FINAL_BUFFER_BYTES:
-            self._drain_complete()
-
-    def _drain_complete(self) -> None:
-        """Commit the final audio buffer and schedule cleanup."""
-        if not self._draining:
-            return
-        self._draining = False
-
-        # Stop the drain polling timer if it's running.
-        if hasattr(self, "_drain_timer") and self._drain_timer.isActive():
-            self._drain_timer.stop()
-
-        # Now stop the recorder — no more audio will be captured.
+        # Stop the recorder — no more audio will be captured.
         self.recorder.stop()
 
-        # Commit whatever audio is buffered and give the server time
-        # to process it before closing the WebSocket.
-        self.transcriber.commit_audio()
+        # Finalize any pending non-final tokens, then signal end-of-audio.
+        self.transcriber.finalize()
+        self.transcriber.send_eof()
+
+        # Give the server time to send back final tokens before closing.
         QTimer.singleShot(1500, self._finish_stop)
 
     def _finish_stop(self) -> None:
-        """Delayed cleanup — close the transcriber after the final commit
+        """Delayed cleanup — close the transcriber after finalization
         has had time to be processed."""
         self.transcriber.stop(blocking=False)
 
@@ -348,30 +307,14 @@ class VoiceBoardApp:
         """Forward audio chunk from the recorder to the transcriber."""
         self.transcriber.send_audio(pcm_bytes)
 
-    def _on_transcription_delta(self, delta: str) -> None:
-        """Handle incremental transcription text — type it in real-time
-        and update the live preview."""
-        self.window.append_live_text(delta)
-        # Queue the delta for typing on a persistent background thread.
-        # (A single worker thread avoids the Windows bug where spawning a
-        # new thread per delta causes the pynput keyboard hook to time out
-        # and drop injected keystrokes after the first word.)
-        enqueue_text(delta)
+    def _on_transcription_text(self, text: str, backspace_count: int) -> None:
+        """Handle transcription text — correct non-final text and type new text.
 
-    def _on_turn_started(self) -> None:
-        """A new speech turn was detected — reset the live preview."""
-        self.window.reset_live_text()
-
-    def _on_transcription_done(self, text: str) -> None:
-        """Handle a completed transcription chunk.
-
-        With manual commits each chunk produces its own completed
-        event, so we only update the status label (the live preview
-        stays visible while recording).
+        *backspace_count* characters of previously typed non-final text are
+        erased first, then *text* (final + new non-final) is typed.
         """
-        self.window.signals.status_update.emit(
-            f"✅ \"{text[:60]}{'…' if len(text) > 60 else ''}\""
-        )
+        self.window.update_live_text(text, backspace_count)
+        enqueue_text(text, backspace_count)
 
     def _on_transcription_error(self, error: str) -> None:
         """Handle transcription error."""
@@ -387,7 +330,7 @@ class VoiceBoardApp:
         self.config.save()
 
         # Update transcriber with new settings
-        self.transcriber.update_api_key(self.config.openai_api_key)
+        self.transcriber.update_api_key(self.config.soniox_api_key)
         self.transcriber.update_language(self.config.language)
 
         # Restart hotkeys with new shortcuts

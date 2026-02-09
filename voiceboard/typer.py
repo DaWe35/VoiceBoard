@@ -202,6 +202,28 @@ class _WaylandPortalTyper:
                     log.exception("Portal keysym injection failed")
                     break
 
+    def send_backspaces(self, count: int) -> None:
+        """Inject *count* Backspace key presses."""
+        if not self._session_path or self._rd is None or count <= 0:
+            return
+
+        import dbus  # type: ignore[import-untyped]
+
+        with self._lock:
+            for _ in range(count):
+                try:
+                    self._rd.NotifyKeyboardKeysym(
+                        dbus.ObjectPath(self._session_path), {},
+                        dbus.Int32(0xFF08), dbus.UInt32(1),  # press BackSpace
+                    )
+                    self._rd.NotifyKeyboardKeysym(
+                        dbus.ObjectPath(self._session_path), {},
+                        dbus.Int32(0xFF08), dbus.UInt32(0),  # release BackSpace
+                    )
+                except Exception:
+                    log.exception("Portal backspace injection failed")
+                    break
+
     def close(self) -> None:
         """Close the portal session."""
         if self._bus is not None:
@@ -239,8 +261,9 @@ class _PynputTyper:
     """Type text using pynput's keyboard Controller."""
 
     def __init__(self):
-        from pynput.keyboard import Controller
+        from pynput.keyboard import Controller, Key
         self._keyboard = Controller()
+        self._backspace_key = Key.backspace
         self._lock = threading.Lock()
 
     def type_text(self, text: str) -> None:
@@ -249,6 +272,17 @@ class _PynputTyper:
                 self._keyboard.type(text)
             except Exception:
                 log.exception("pynput typing failed")
+
+    def send_backspaces(self, count: int) -> None:
+        if count <= 0:
+            return
+        with self._lock:
+            try:
+                for _ in range(count):
+                    self._keyboard.press(self._backspace_key)
+                    self._keyboard.release(self._backspace_key)
+            except Exception:
+                log.exception("pynput backspace failed")
 
 
 # ── Module-level singleton ─────────────────────────────────────
@@ -291,24 +325,32 @@ class _TypingWorker:
     on Windows, causes the pynput low-level keyboard hook to exceed its
     timeout — making Windows silently drop injected keystrokes after the
     first word.  A single long-lived worker thread avoids this entirely.
+
+    Each work item is a ``(text, backspace_count)`` tuple.  The worker
+    first sends *backspace_count* backspaces (to erase previously typed
+    non-final text), then types *text*.
     """
 
     def __init__(self):
-        self._queue: queue.Queue[Optional[str]] = queue.Queue()
+        self._queue: queue.Queue[Optional[tuple[str, int]]] = queue.Queue()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def enqueue(self, text: str) -> None:
-        """Schedule *text* to be typed.  Returns immediately."""
-        self._queue.put(text)
+    def enqueue(self, text: str, backspace_count: int = 0) -> None:
+        """Schedule *backspace_count* backspaces followed by *text*.  Returns immediately."""
+        self._queue.put((text, backspace_count))
 
     def _run(self) -> None:
         while True:
-            text = self._queue.get()
-            if text is None:        # poison pill → shut down
+            item = self._queue.get()
+            if item is None:        # poison pill → shut down
                 break
+            text, bs = item
+            typer = _get_typer()
+            if bs > 0:
+                typer.send_backspaces(bs)
             if text:
-                _get_typer().type_text(text)
+                typer.type_text(text)
 
 
 _worker: Optional[_TypingWorker] = None
@@ -351,8 +393,8 @@ def type_text(text: str) -> None:
     _get_typer().type_text(text)
 
 
-def enqueue_text(text: str) -> None:
-    """Queue *text* to be typed on a persistent background thread.
+def enqueue_text(text: str, backspace_count: int = 0) -> None:
+    """Queue *backspace_count* backspaces then *text* on a persistent background thread.
 
     Unlike :func:`type_text` (which types synchronously on the calling
     thread), this function returns immediately and the actual keystroke
@@ -361,6 +403,6 @@ def enqueue_text(text: str) -> None:
     on Windows — prevents the pynput keyboard hook from timing out and
     dropping injected keystrokes.
     """
-    if not text:
+    if not text and backspace_count <= 0:
         return
-    _get_worker().enqueue(text)
+    _get_worker().enqueue(text, backspace_count)

@@ -25,14 +25,13 @@ CONFIG_FILE = _config_dir() / "config.json"
 
 @dataclass
 class AppConfig:
-    openai_api_key: str = ""
+    soniox_api_key: str = ""
     toggle_shortcut: str = "<ctrl>+<shift>+v"
     ptt_shortcut: str = "<ctrl>+<shift>+b"
     language: str = ""
     input_device: str = ""  # empty = system default
     start_minimized: bool = False
     auto_start: bool = False
-    model: str = "gpt-4o-mini-transcribe"
 
     def save(self) -> None:
         """Persist config to disk."""

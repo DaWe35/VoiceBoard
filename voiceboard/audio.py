@@ -1,10 +1,10 @@
 """Audio recording module for VoiceBoard.
 
-Captures microphone audio and streams raw PCM16 chunks at 24 kHz mono
-to a callback (used to feed the OpenAI Realtime API transcriber).
+Captures microphone audio and streams raw PCM16 chunks at 16 kHz mono
+to a callback (used to feed the Soniox STT WebSocket transcriber).
 
 The recorder always opens the device at its native/default sample rate
-and resamples to 24 kHz on the fly if needed, so it works with any
+and resamples to 16 kHz on the fly if needed, so it works with any
 hardware without manual configuration.
 """
 
@@ -18,8 +18,8 @@ import sounddevice as sd
 
 log = logging.getLogger(__name__)
 
-# The OpenAI Realtime API requires 24 kHz PCM16 mono.
-TARGET_RATE = 24000
+# Soniox STT expects 16 kHz PCM16 mono.
+TARGET_RATE = 16000
 
 
 def list_input_devices() -> list[dict]:
