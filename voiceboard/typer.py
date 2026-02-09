@@ -329,6 +329,16 @@ def _get_worker() -> _TypingWorker:
 
 # ── Public API ─────────────────────────────────────────────────
 
+def ensure_ready() -> None:
+    """Eagerly initialise the platform typer (and trigger any permission
+    dialogs, e.g. the Wayland RemoteDesktop portal prompt) so that the
+    user is asked *now* rather than on the first transcription delta.
+
+    Safe to call from any thread; repeated calls are no-ops.
+    """
+    _get_typer()
+
+
 def type_text(text: str) -> None:
     """Inject *text* into the currently focused input field, as if the
     user typed it on a physical keyboard.

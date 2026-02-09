@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer
 from voiceboard.config import AppConfig
 from voiceboard.audio import AudioRecorder, list_input_devices
 from voiceboard.transcriber import RealtimeTranscriber
-from voiceboard.typer import enqueue_text
+from voiceboard.typer import enqueue_text, ensure_ready as ensure_typer_ready
 from voiceboard.hotkeys import HotkeyManager
 from voiceboard.ui import MainWindow, create_tray_icon, svg_to_icon, STYLESHEET
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
@@ -126,6 +126,11 @@ class VoiceBoardApp:
                 "⚠️ Please set your OpenAI API key in Settings and save."
             )
             return
+
+        # Eagerly initialise the typer so that any platform permission
+        # dialog (e.g. Wayland RemoteDesktop portal) appears now, not
+        # in the middle of a transcription.
+        ensure_typer_ready()
 
         self._recording = True
         self.window.set_recording_state(True)
