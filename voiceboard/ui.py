@@ -20,11 +20,41 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSizePolicy,
     QStackedWidget,
+    QTextEdit,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QObject, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence
 
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
+
+
+_COPY_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+  viewBox="0 0 24 24" fill="none" stroke="{color}"
+  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+</svg>"""
+
+_CHECK_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+  viewBox="0 0 24 24" fill="none" stroke="{color}"
+  stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+  <polyline points="20 6 9 17 4 12"/>
+</svg>"""
+
+
+def _make_icon_from_svg(svg_template: str, size: int = 24, color: str = "#b0b0d0") -> QIcon:
+    """Create a QIcon from an SVG template string with a {color} placeholder."""
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtCore import QByteArray
+
+    svg = svg_template.replace("{color}", color)
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    renderer = QSvgRenderer(QByteArray(svg.encode()))
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 _REFRESH_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
@@ -870,17 +900,51 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_label)
 
         # ── Live Transcription Preview ──
-        self.live_preview = QLabel("")
+        self._preview_container = QWidget()
+        self._preview_container.setObjectName("previewContainer")
+        preview_layout = QVBoxLayout(self._preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(0)
+
+        self.live_preview = QTextEdit()
         self.live_preview.setObjectName("livePreview")
-        self.live_preview.setAlignment(Qt.AlignCenter)
-        self.live_preview.setWordWrap(True)
-        self.live_preview.setMinimumHeight(40)
+        self.live_preview.setReadOnly(True)
+        self.live_preview.setMinimumHeight(60)
+        self.live_preview.setMaximumHeight(120)
         self.live_preview.setStyleSheet(
-            "color: #b0b0d0; font-size: 15px; font-style: italic; "
-            "padding: 8px; background-color: #16213e; border-radius: 8px;"
+            "QTextEdit { color: #b0b0d0; font-size: 15px; font-style: italic; "
+            "padding: 8px 28px 8px 8px; background-color: #16213e; border-radius: 8px; border: none; }"
+            "QScrollBar:vertical { width: 6px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: #2d2d4a; border-radius: 3px; min-height: 20px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
-        self.live_preview.hide()
-        layout.addWidget(self.live_preview)
+        preview_layout.addWidget(self.live_preview)
+
+        # Small copy icon button overlaid inside the text area (top-right)
+        self.copy_btn = QPushButton(self.live_preview)
+        self.copy_btn.setFixedSize(26, 26)
+        self.copy_btn.setIconSize(QSize(16, 16))
+        self.copy_btn.setIcon(_make_icon_from_svg(_COPY_ICON_SVG, 16, "#b0b0d0"))
+        self.copy_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_btn.setToolTip("Copy all session text")
+        self.copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(45, 45, 74, 0.85);
+                border-radius: 5px;
+                border: none;
+                padding: 0px;
+            }
+            QPushButton:hover { background-color: rgba(61, 61, 90, 0.95); }
+        """)
+        self.copy_btn.clicked.connect(self._copy_session_text)
+        # Reposition the button whenever the text area resizes
+        self.live_preview.installEventFilter(self)
+
+        self._preview_container.hide()
+        layout.addWidget(self._preview_container)
+
+        # Session text accumulator — stores ALL text from the session
+        self._session_text = ""
 
         layout.addStretch()
 
@@ -965,22 +1029,60 @@ class MainWindow(QMainWindow):
         if recording:
             self.status_label.setProperty("recording", "true")
             self.status_label.setText("🔴 Recording... speak now")
-            self.live_preview.setText("")
-            self.live_preview.show()
+            # Reset session text and preview when starting a new session
+            self._session_text = ""
+            self.live_preview.clear()
+            self._preview_container.show()
             # Switch to main page so the user sees the recording state
             self._show_main()
         else:
             self.status_label.setProperty("recording", "false")
-            self.live_preview.hide()
+            # Keep the preview container visible so the user can still
+            # see and copy the text from the session that just ended.
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
 
     def update_live_text(self, text: str, backspace_count: int) -> None:
-        """Update the live preview — erase *backspace_count* chars then append *text*."""
-        current = self.live_preview.text()
+        """Update the live preview — erase *backspace_count* chars then append *text*.
+
+        Also maintains ``_session_text`` which accumulates all text from
+        the current session for the copy button.
+        """
+        current = self.live_preview.toPlainText()
         if backspace_count > 0:
             current = current[:-backspace_count] if backspace_count < len(current) else ""
-        self.live_preview.setText(current + text)
+        new_content = current + text
+        self.live_preview.setPlainText(new_content)
+
+        # Auto-scroll to the bottom so the latest words are always visible
+        scrollbar = self.live_preview.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+        # Update the session accumulator: apply the same backspace logic
+        if backspace_count > 0:
+            self._session_text = (
+                self._session_text[:-backspace_count]
+                if backspace_count < len(self._session_text)
+                else ""
+            )
+        self._session_text += text
+
+    def eventFilter(self, obj, event) -> bool:
+        """Reposition the copy button when the preview text area is resized."""
+        from PySide6.QtCore import QEvent
+        if obj is self.live_preview and event.type() == QEvent.Resize:
+            self.copy_btn.move(self.live_preview.width() - 30, 4)
+        return super().eventFilter(obj, event)
+
+    def _copy_session_text(self) -> None:
+        """Copy all accumulated session text to the clipboard."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self._session_text)
+        # Brief visual feedback — swap to a checkmark icon
+        self.copy_btn.setIcon(_make_icon_from_svg(_CHECK_ICON_SVG, 16, "#6C63FF"))
+        QTimer.singleShot(1500, lambda: self.copy_btn.setIcon(
+            _make_icon_from_svg(_COPY_ICON_SVG, 16, "#b0b0d0")
+        ))
 
     def populate_mic_list(self, devices: list[dict], saved_device: str = "") -> None:
         """Fill the microphone combo box with available input devices."""

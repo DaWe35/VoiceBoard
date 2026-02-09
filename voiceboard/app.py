@@ -285,6 +285,7 @@ class VoiceBoardApp:
         self._recording = False
 
         self.window.set_recording_state(False)
+        self.window.signals.status_update.emit("Stopped — text available below")
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
         self.tray.setToolTip("VoiceBoard — Voice Keyboard")
 
