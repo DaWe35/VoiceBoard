@@ -1,17 +1,93 @@
 """Main application logic for VoiceBoard — wires all modules together."""
 
+import atexit
+import os
+import signal
 import sys
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QTimer
 
-from voiceboard.config import AppConfig
+from voiceboard.config import AppConfig, _config_dir
 from voiceboard.audio import AudioRecorder, list_input_devices
 from voiceboard.transcriber import RealtimeTranscriber
 from voiceboard.typer import enqueue_text, ensure_ready as ensure_typer_ready
 from voiceboard.hotkeys import HotkeyManager
 from voiceboard.ui import MainWindow, create_tray_icon, svg_to_icon, STYLESHEET
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
+
+_LOCK_FILE = _config_dir() / "voiceboard.pid"
+
+
+def _kill_existing_instance() -> None:
+    """If another VoiceBoard instance is running, terminate it."""
+    if not _LOCK_FILE.exists():
+        return
+    try:
+        old_pid = int(_LOCK_FILE.read_text().strip())
+    except (ValueError, OSError):
+        # Corrupt or unreadable lock file — just remove it
+        _LOCK_FILE.unlink(missing_ok=True)
+        return
+
+    if old_pid == os.getpid():
+        return  # it's us
+
+    # Check if the process is still alive
+    try:
+        os.kill(old_pid, 0)  # signal 0 = existence check
+    except ProcessLookupError:
+        # Process is gone — stale lock file
+        _LOCK_FILE.unlink(missing_ok=True)
+        return
+    except PermissionError:
+        # Process exists but we can't query it (different user) — try to kill anyway
+        pass
+
+    # Terminate the old instance
+    try:
+        if sys.platform == "win32":
+            os.kill(old_pid, signal.SIGTERM)
+        else:
+            os.kill(old_pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass  # already gone or not ours
+
+    # Give it a moment to exit, then force-kill if necessary
+    import time
+    for _ in range(20):  # wait up to 2 seconds
+        time.sleep(0.1)
+        try:
+            os.kill(old_pid, 0)
+        except ProcessLookupError:
+            break  # it's gone
+        except PermissionError:
+            break
+    else:
+        # Still alive — force kill
+        try:
+            if sys.platform == "win32":
+                os.kill(old_pid, signal.SIGTERM)
+            else:
+                os.kill(old_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    _LOCK_FILE.unlink(missing_ok=True)
+
+
+def _write_pid_file() -> None:
+    """Write current PID to the lock file."""
+    _LOCK_FILE.write_text(str(os.getpid()))
+
+
+def _remove_pid_file() -> None:
+    """Remove the lock file on exit."""
+    try:
+        if _LOCK_FILE.exists() and _LOCK_FILE.read_text().strip() == str(os.getpid()):
+            _LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 class VoiceBoardApp:
@@ -30,6 +106,11 @@ class VoiceBoardApp:
 
     def run(self) -> int:
         """Run the application."""
+        # Ensure only one instance runs at a time
+        _kill_existing_instance()
+        _write_pid_file()
+        atexit.register(_remove_pid_file)
+
         self.qt_app = QApplication(sys.argv)
         self.qt_app.setApplicationName("VoiceBoard")
         self.qt_app.setQuitOnLastWindowClosed(False)
