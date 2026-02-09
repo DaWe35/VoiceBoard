@@ -103,6 +103,7 @@ class VoiceBoardApp:
         )
         self.hotkeys = HotkeyManager()
         self._recording = False
+        self._draining = False
 
     def run(self) -> int:
         """Run the application."""
@@ -237,12 +238,12 @@ class VoiceBoardApp:
         """Toggle recording on/off."""
         if self._recording:
             self._stop_recording()
-        else:
+        elif not self._draining:
             self._start_recording()
 
     def _on_ptt_press(self) -> None:
         """Push-to-talk: start recording on press."""
-        if not self._recording:
+        if not self._recording and not self._draining:
             self._start_recording()
 
     def _on_ptt_release(self) -> None:
@@ -281,19 +282,62 @@ class VoiceBoardApp:
         # Start capturing audio (chunks will be forwarded to the transcriber)
         self.recorder.start()
 
-    def _stop_recording(self) -> None:
-        """Stop recording and disconnect from the Realtime API."""
-        self._recording = False
-        self.recorder.stop()
+    # Minimum PCM bytes for the final audio buffer before committing.
+    # 100 ms at 24 kHz mono PCM16 = 24000 * 0.1 * 2 = 4800 bytes.
+    _MIN_FINAL_BUFFER_BYTES = 4800
 
-        # Commit any remaining audio so the last words get transcribed,
-        # then give the server a moment to process before closing.
-        self.transcriber.commit_audio()
-        QTimer.singleShot(1500, self._finish_stop)
+    def _stop_recording(self) -> None:
+        """Stop recording and disconnect from the Realtime API.
+
+        The recorder is kept alive briefly so that the last audio buffer
+        reaches at least 100 ms before the final commit — this avoids
+        sending a tiny, potentially unusable tail chunk to the API.
+        """
+        self._recording = False
+        self._draining = True
 
         self.window.set_recording_state(False)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
         self.tray.setToolTip("VoiceBoard — Voice Keyboard")
+
+        # Check if we already have enough audio buffered since the last
+        # commit; if so, commit immediately, otherwise keep recording
+        # until we reach the minimum.
+        if self.transcriber.bytes_since_commit >= self._MIN_FINAL_BUFFER_BYTES:
+            self._drain_complete()
+        else:
+            # Poll every 20 ms until enough audio has been buffered.
+            self._drain_timer = QTimer()
+            self._drain_timer.setInterval(20)
+            self._drain_timer.timeout.connect(self._check_drain)
+            self._drain_timer.start()
+            # Safety timeout: stop draining after 500 ms regardless.
+            QTimer.singleShot(500, self._drain_complete)
+
+    def _check_drain(self) -> None:
+        """Poll until the audio buffer has reached the minimum size."""
+        if not self._draining:
+            return
+        if self.transcriber.bytes_since_commit >= self._MIN_FINAL_BUFFER_BYTES:
+            self._drain_complete()
+
+    def _drain_complete(self) -> None:
+        """Commit the final audio buffer and schedule cleanup."""
+        if not self._draining:
+            return
+        self._draining = False
+
+        # Stop the drain polling timer if it's running.
+        if hasattr(self, "_drain_timer") and self._drain_timer.isActive():
+            self._drain_timer.stop()
+
+        # Now stop the recorder — no more audio will be captured.
+        self.recorder.stop()
+
+        # Commit whatever audio is buffered and give the server time
+        # to process it before closing the WebSocket.
+        self.transcriber.commit_audio()
+        QTimer.singleShot(1500, self._finish_stop)
 
     def _finish_stop(self) -> None:
         """Delayed cleanup — close the transcriber after the final commit

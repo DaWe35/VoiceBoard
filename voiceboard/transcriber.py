@@ -59,6 +59,7 @@ class RealtimeTranscriber:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._has_audio = False  # True when audio has been appended since last commit
+        self._bytes_since_commit = 0  # PCM bytes appended since last commit
 
         # Accumulate deltas per item_id for the completed transcript
         self._transcripts: dict[str, str] = {}
@@ -92,6 +93,7 @@ class RealtimeTranscriber:
 
         self._running = True
         self._has_audio = False
+        self._bytes_since_commit = 0
         self._transcripts.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -138,8 +140,14 @@ class RealtimeTranscriber:
                 self._ws.send(json.dumps(event)), self._loop
             )
             self._has_audio = True
+            self._bytes_since_commit += len(pcm_bytes)
         except Exception:
             pass  # connection may have closed
+
+    @property
+    def bytes_since_commit(self) -> int:
+        """Number of PCM bytes appended since the last commit."""
+        return self._bytes_since_commit
 
     def commit_audio(self) -> None:
         """Manually commit the current audio buffer.
@@ -155,6 +163,8 @@ class RealtimeTranscriber:
             asyncio.run_coroutine_threadsafe(
                 self._ws.send(json.dumps(event)), self._loop
             )
+            self._bytes_since_commit = 0
+            self._has_audio = False
         except Exception:
             pass
 
@@ -267,6 +277,7 @@ class RealtimeTranscriber:
             try:
                 await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                 self._has_audio = False
+                self._bytes_since_commit = 0
             except Exception:
                 break  # connection gone
 
