@@ -286,14 +286,19 @@ class VoiceBoardApp:
         self._recording = False
         self.recorder.stop()
 
-        # Signal the transcriber to close without blocking the GUI thread.
-        # The WebSocket close and thread cleanup happen in the background;
-        # the _run_loop finally-block resets _running / _ws on its own.
-        self.transcriber.stop(blocking=False)
+        # Commit any remaining audio so the last words get transcribed,
+        # then give the server a moment to process before closing.
+        self.transcriber.commit_audio()
+        QTimer.singleShot(1500, self._finish_stop)
 
         self.window.set_recording_state(False)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
         self.tray.setToolTip("VoiceBoard — Voice Keyboard")
+
+    def _finish_stop(self) -> None:
+        """Delayed cleanup — close the transcriber after the final commit
+        has had time to be processed."""
+        self.transcriber.stop(blocking=False)
 
     def _on_audio_chunk(self, pcm_bytes: bytes) -> None:
         """Forward audio chunk from the recorder to the transcriber."""
@@ -314,7 +319,12 @@ class VoiceBoardApp:
         self.window.reset_live_text()
 
     def _on_transcription_done(self, text: str) -> None:
-        """Handle completed transcription — update status bar."""
+        """Handle a completed transcription chunk.
+
+        With manual commits each chunk produces its own completed
+        event, so we only update the status label (the live preview
+        stays visible while recording).
+        """
         self.window.signals.status_update.emit(
             f"✅ \"{text[:60]}{'…' if len(text) > 60 else ''}\""
         )
