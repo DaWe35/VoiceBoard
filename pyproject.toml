@@ -14,6 +14,7 @@ dependencies = [
     "sounddevice>=0.4.6",
     "numpy>=1.24.0",
     "pynput>=1.7.6",
+    "evdev>=1.7.0; sys_platform == 'linux'",
     "dbus-python>=1.3.2; sys_platform == 'linux'",
     "websockets>=12.0",
 ]

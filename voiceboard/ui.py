@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QObject, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen
+from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence
 
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
 
@@ -260,6 +260,206 @@ class AudioLevelWidget(QWidget):
         painter.end()
 
 
+class ShortcutCaptureInput(QLineEdit):
+    """A line-edit that captures key combinations when focused.
+
+    Instead of typing text, the user presses a key combo (e.g. Ctrl+Shift+V)
+    and the widget records it, displaying a human-readable label and storing
+    the pynput-compatible shortcut string internally.
+
+    Click the field → it enters "listening" mode → press a key combo →
+    it gets recorded and the field shows the combo.  Press Escape or
+    Backspace to clear.
+    """
+
+    shortcut_changed = Signal(str)  # emits the pynput-format string
+
+    # Qt modifier flags → (display name, pynput token)
+    _MODIFIER_MAP = [
+        (Qt.ControlModifier, "Ctrl", "<ctrl>"),
+        (Qt.ShiftModifier, "Shift", "<shift>"),
+        (Qt.AltModifier, "Alt", "<alt>"),
+        (Qt.MetaModifier, "Super", "<super>"),
+    ]
+
+    # Qt key codes for modifier-only keys (we ignore these as the "main" key)
+    _MODIFIER_KEYS = {
+        Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_AltGr,
+        Qt.Key_Meta, Qt.Key_Super_L, Qt.Key_Super_R,
+    }
+
+    # Mapping of special Qt keys → (display, pynput token)
+    _SPECIAL_KEYS: dict[int, tuple[str, str]] = {
+        Qt.Key_F1: ("F1", "<f1>"), Qt.Key_F2: ("F2", "<f2>"),
+        Qt.Key_F3: ("F3", "<f3>"), Qt.Key_F4: ("F4", "<f4>"),
+        Qt.Key_F5: ("F5", "<f5>"), Qt.Key_F6: ("F6", "<f6>"),
+        Qt.Key_F7: ("F7", "<f7>"), Qt.Key_F8: ("F8", "<f8>"),
+        Qt.Key_F9: ("F9", "<f9>"), Qt.Key_F10: ("F10", "<f10>"),
+        Qt.Key_F11: ("F11", "<f11>"), Qt.Key_F12: ("F12", "<f12>"),
+        Qt.Key_Space: ("Space", "<space>"),
+        Qt.Key_Return: ("Enter", "<enter>"),
+        Qt.Key_Enter: ("Enter", "<enter>"),
+        Qt.Key_Tab: ("Tab", "<tab>"),
+        Qt.Key_Backspace: ("Backspace", "<backspace>"),
+        Qt.Key_Delete: ("Delete", "<delete>"),
+        Qt.Key_Home: ("Home", "<home>"),
+        Qt.Key_End: ("End", "<end>"),
+        Qt.Key_PageUp: ("PageUp", "<page_up>"),
+        Qt.Key_PageDown: ("PageDown", "<page_down>"),
+        Qt.Key_Up: ("Up", "<up>"),
+        Qt.Key_Down: ("Down", "<down>"),
+        Qt.Key_Left: ("Left", "<left>"),
+        Qt.Key_Right: ("Right", "<right>"),
+        Qt.Key_Insert: ("Insert", "<insert>"),
+        Qt.Key_Pause: ("Pause", "<pause>"),
+        Qt.Key_Print: ("PrintScreen", "<print_screen>"),
+        Qt.Key_ScrollLock: ("ScrollLock", "<scroll_lock>"),
+        Qt.Key_CapsLock: ("CapsLock", "<caps_lock>"),
+        Qt.Key_NumLock: ("NumLock", "<num_lock>"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setCursor(Qt.PointingHandCursor)
+        self._shortcut_str = ""  # pynput-compatible string
+        self._listening = False
+        self._update_placeholder()
+
+    def shortcut_string(self) -> str:
+        """Return the stored pynput-format shortcut string."""
+        return self._shortcut_str
+
+    def set_shortcut_string(self, shortcut_str: str) -> None:
+        """Set the shortcut from a pynput-format string and update display."""
+        self._shortcut_str = shortcut_str
+        if shortcut_str:
+            self.setText(self._pynput_to_display(shortcut_str))
+        else:
+            self.setText("")
+        self._listening = False
+        self._update_style()
+
+    def _update_placeholder(self) -> None:
+        self.setPlaceholderText("Click here, then press a shortcut…")
+
+    def _update_style(self) -> None:
+        if self._listening:
+            self.setStyleSheet(
+                "QLineEdit { border: 2px solid #6C63FF; background-color: #1e1e3e; "
+                "color: #6C63FF; font-weight: bold; }"
+            )
+        else:
+            self.setStyleSheet("")  # revert to global stylesheet
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self._listening = True
+        self.setText("Press a key combination…")
+        self._update_style()
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self._listening = False
+        # Restore display text
+        if self._shortcut_str:
+            self.setText(self._pynput_to_display(self._shortcut_str))
+        else:
+            self.setText("")
+        self._update_style()
+
+    def keyPressEvent(self, event) -> None:
+        if not self._listening:
+            return
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # Escape → clear the shortcut
+        if key == Qt.Key_Escape:
+            self._shortcut_str = ""
+            self.setText("")
+            self.shortcut_changed.emit("")
+            self.clearFocus()
+            return
+
+        # Ignore bare modifier presses — wait for the actual key
+        if key in self._MODIFIER_KEYS:
+            return
+
+        # Build display and pynput strings
+        display_parts = []
+        pynput_parts = []
+
+        for qt_mod, disp_name, pynput_token in self._MODIFIER_MAP:
+            if modifiers & qt_mod:
+                display_parts.append(disp_name)
+                pynput_parts.append(pynput_token)
+
+        # Resolve the main key
+        if key in self._SPECIAL_KEYS:
+            disp, pynput_tok = self._SPECIAL_KEYS[key]
+            display_parts.append(disp)
+            pynput_parts.append(pynput_tok)
+        else:
+            text = event.text()
+            if text and text.isprintable():
+                ch = text.lower()
+                display_parts.append(ch.upper())
+                pynput_parts.append(ch)
+            else:
+                # Unknown key — try to get a name from QKeySequence
+                seq = QKeySequence(key)
+                name = seq.toString()
+                if name:
+                    display_parts.append(name)
+                    pynput_parts.append(f"<{name.lower()}>")
+                else:
+                    return  # unrecognised key, ignore
+
+        display_text = " + ".join(display_parts)
+        pynput_text = "+".join(pynput_parts)
+
+        self._shortcut_str = pynput_text
+        self.setText(display_text)
+        self.shortcut_changed.emit(pynput_text)
+        self.clearFocus()
+
+    @staticmethod
+    def _pynput_to_display(shortcut_str: str) -> str:
+        """Convert a pynput-format shortcut string to a nice display label."""
+        if not shortcut_str:
+            return ""
+        token_display = {
+            "<ctrl>": "Ctrl", "<shift>": "Shift", "<alt>": "Alt",
+            "<super>": "Super", "<cmd>": "Super",
+            "<space>": "Space", "<enter>": "Enter", "<tab>": "Tab",
+            "<backspace>": "Backspace", "<delete>": "Delete",
+            "<home>": "Home", "<end>": "End",
+            "<page_up>": "PageUp", "<page_down>": "PageDown",
+            "<up>": "Up", "<down>": "Down", "<left>": "Left", "<right>": "Right",
+            "<insert>": "Insert", "<pause>": "Pause",
+            "<print_screen>": "PrintScreen", "<scroll_lock>": "ScrollLock",
+            "<caps_lock>": "CapsLock", "<num_lock>": "NumLock",
+        }
+        for i in range(1, 13):
+            token_display[f"<f{i}>"] = f"F{i}"
+
+        parts = shortcut_str.split("+")
+        display_parts = []
+        for part in parts:
+            part_stripped = part.strip()
+            lower = part_stripped.lower()
+            if lower in token_display:
+                display_parts.append(token_display[lower])
+            elif len(part_stripped) == 1:
+                display_parts.append(part_stripped.upper())
+            else:
+                display_parts.append(part_stripped)
+        return " + ".join(display_parts)
+
+
 class SignalBridge(QObject):
     """Bridge for thread-safe signal communication."""
     toggle_signal = Signal()
@@ -359,12 +559,10 @@ class MainWindow(QMainWindow):
         shortcut_layout = QFormLayout()
         shortcut_layout.setSpacing(10)
 
-        self.toggle_input = QLineEdit()
-        self.toggle_input.setPlaceholderText("<ctrl>+<shift>+v")
+        self.toggle_input = ShortcutCaptureInput()
         shortcut_layout.addRow("Toggle (start/stop):", self.toggle_input)
 
-        self.ptt_input = QLineEdit()
-        self.ptt_input.setPlaceholderText("<ctrl>+<shift>+b")
+        self.ptt_input = ShortcutCaptureInput()
         shortcut_layout.addRow("Push-to-talk (hold):", self.ptt_input)
 
         shortcut_group.setLayout(shortcut_layout)
@@ -488,16 +686,16 @@ class MainWindow(QMainWindow):
     def load_config(self, config) -> None:
         """Populate UI fields from config object."""
         self.api_key_input.setText(config.openai_api_key)
-        self.toggle_input.setText(config.toggle_shortcut)
-        self.ptt_input.setText(config.ptt_shortcut)
+        self.toggle_input.set_shortcut_string(config.toggle_shortcut)
+        self.ptt_input.set_shortcut_string(config.ptt_shortcut)
         self.language_input.setCurrentText(config.language)
         self.start_minimized_cb.setChecked(config.start_minimized)
 
     def save_to_config(self, config) -> None:
         """Write UI field values back to config object."""
         config.openai_api_key = self.api_key_input.text().strip()
-        config.toggle_shortcut = self.toggle_input.text().strip()
-        config.ptt_shortcut = self.ptt_input.text().strip()
+        config.toggle_shortcut = self.toggle_input.shortcut_string()
+        config.ptt_shortcut = self.ptt_input.shortcut_string()
         config.language = self.language_input.currentText().strip()
         config.start_minimized = self.start_minimized_cb.isChecked()
         config.input_device = self.selected_device_index()
