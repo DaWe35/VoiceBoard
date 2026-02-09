@@ -952,7 +952,7 @@ class MainWindow(QMainWindow):
     def _show_main(self) -> None:
         """Switch back to the main page."""
         self._stack.setCurrentIndex(0)
-        self.setMinimumSize(320, 360)
+        self.setMinimumSize(320, 450)
         self.resize(self.minimumSize())
         self.settings_page.closed.emit()
 

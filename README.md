@@ -1,6 +1,6 @@
 # VoiceBoard
 
-Cross-platform voice keyboard powered by OpenAI transcription. Speak into your mic and have the text typed into any focused application.
+Cross-platform voice keyboard powered by Soniox real-time transcription. Speak into your mic and have the text typed into any focused application.
 
 ## Development Setup
 
