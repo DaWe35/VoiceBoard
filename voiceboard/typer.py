@@ -237,9 +237,19 @@ class _WaylandPortalTyper:
 
     # ── internal ──
 
-    @staticmethod
-    def _char_to_keysym(ch: str) -> int:
-        """Convert a character to its XKB keysym value."""
+    _xkb_lib = None  # loaded lazily
+    _xkb_loaded = False
+
+    @classmethod
+    def _char_to_keysym(cls, ch: str) -> int:
+        """Convert a character to its XKB keysym value.
+
+        Uses libxkbcommon's ``xkb_utf32_to_keysym`` when available so that
+        characters with dedicated legacy keysyms (e.g. Hungarian ű → 0x01FB)
+        are mapped correctly — the portal's ``NotifyKeyboardKeysym`` does not
+        always accept the generic ``0x0100_0000 + codepoint`` encoding for
+        these characters.
+        """
         cp = ord(ch)
         if cp == 0x0A:          # newline → Return
             return 0xFF0D
@@ -251,8 +261,35 @@ class _WaylandPortalTyper:
             return cp
         if 0xA0 <= cp <= 0xFF:  # Latin-1 supplement
             return cp
-        # General Unicode → keysym = 0x0100_0000 + codepoint
+
+        # Try libxkbcommon for correct legacy-keysym mapping
+        xkb = cls._get_xkb_lib()
+        if xkb is not None:
+            keysym = xkb.xkb_utf32_to_keysym(cp)
+            if keysym != 0:  # 0 = XKB_KEY_NoSymbol
+                return keysym
+
+        # Fallback: general Unicode → keysym = 0x0100_0000 + codepoint
         return 0x01000000 + cp
+
+    @classmethod
+    def _get_xkb_lib(cls):
+        """Lazily load libxkbcommon and cache the handle."""
+        if cls._xkb_loaded:
+            return cls._xkb_lib
+        cls._xkb_loaded = True
+        try:
+            import ctypes
+            import ctypes.util
+            name = ctypes.util.find_library("xkbcommon")
+            if name:
+                lib = ctypes.CDLL(name)
+                lib.xkb_utf32_to_keysym.argtypes = [ctypes.c_uint32]
+                lib.xkb_utf32_to_keysym.restype = ctypes.c_uint32
+                cls._xkb_lib = lib
+        except Exception:
+            log.debug("Could not load libxkbcommon; using fallback keysym mapping")
+        return cls._xkb_lib
 
 
 # ── pynput fallback (X11, macOS, Windows) ──────────────────────
