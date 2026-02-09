@@ -894,7 +894,7 @@ class MainWindow(QMainWindow):
 
     def _show_settings(self) -> None:
         """Switch to the settings page."""
-        self.setMinimumSize(420, 620)
+        self.setMinimumSize(420, 800)
         self._stack.setCurrentIndex(1)
         self.settings_page.opened.emit()
 
