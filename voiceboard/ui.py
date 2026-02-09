@@ -853,7 +853,10 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        # ── Settings Button ──
+        # ── Bottom buttons row ──
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(10)
+
         self.settings_btn = QPushButton("⚙️ Settings")
         self.settings_btn.setCursor(Qt.PointingHandCursor)
         self.settings_btn.setStyleSheet("""
@@ -868,7 +871,25 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background-color: #3d3d5a; color: #e0e0e0; }
         """)
         self.settings_btn.clicked.connect(self._show_settings)
-        layout.addWidget(self.settings_btn)
+        bottom_row.addWidget(self.settings_btn)
+
+        self.quit_btn = QPushButton("✕ Quit")
+        self.quit_btn.setCursor(Qt.PointingHandCursor)
+        self.quit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d4a;
+                border-radius: 8px;
+                padding: 12px 20px;
+                font-size: 14px;
+                font-weight: bold;
+                color: #b0b0d0;
+            }
+            QPushButton:hover { background-color: #4a2030; color: #FF6B6B; }
+        """)
+        self.quit_btn.clicked.connect(QApplication.instance().quit)
+        bottom_row.addWidget(self.quit_btn)
+
+        layout.addLayout(bottom_row)
 
         self._stack.addWidget(main_page)  # index 0
 
