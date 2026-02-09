@@ -794,7 +794,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("VoiceBoard")
-        self.setMinimumSize(320, 360)
+        self.setMinimumSize(320, 450)
         self.resize(self.minimumSize())
         self.setMaximumWidth(500)
         self.setWindowIcon(svg_to_icon(TRAY_ICON_SVG))
