@@ -1,6 +1,7 @@
 """Modern UI for VoiceBoard using PySide6 (Qt6)."""
 
 import sys
+from typing import Optional
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -236,6 +237,16 @@ class AudioLevelWidget(QWidget):
         self.setFixedHeight(8)
         self.setMinimumWidth(200)
         self._level = 0.0
+        self._recording = False
+
+    @property
+    def recording(self) -> bool:
+        return self._recording
+
+    @recording.setter
+    def recording(self, value: bool) -> None:
+        self._recording = value
+        self.update()
 
     def set_level(self, level: float) -> None:
         self._level = min(1.0, max(0.0, level * 8))  # amplify for visibility
@@ -253,7 +264,10 @@ class AudioLevelWidget(QWidget):
         # Level fill
         if self._level > 0:
             w = int(self.width() * self._level)
-            color = QColor("#6C63FF") if self._level < 0.7 else QColor("#FF6B6B")
+            if self._recording:
+                color = QColor("#FF4444")
+            else:
+                color = QColor("#6C63FF") if self._level < 0.7 else QColor("#FF6B6B")
             painter.setBrush(color)
             painter.drawRoundedRect(0, 0, w, self.height(), 4, 4)
 
@@ -263,39 +277,49 @@ class AudioLevelWidget(QWidget):
 class ShortcutCaptureInput(QLineEdit):
     """A line-edit that captures key combinations when focused.
 
-    Instead of typing text, the user presses a key combo (e.g. Ctrl+Shift+V)
-    and the widget records it, displaying a human-readable label and storing
-    the pynput-compatible shortcut string internally.
+    Supports:
+      - Modifier combos: Ctrl+Shift+V
+      - Any-key combos: Space+B, A+S
+      - Double-tap: press the same single key twice quickly → "2× Ctrl"
+      - Single non-modifier keys: F5, Pause, etc.
 
     Click the field → it enters "listening" mode → press a key combo →
-    it gets recorded and the field shows the combo.  Press Escape or
-    Backspace to clear.
+    it gets recorded.  Press Escape to clear.
+
+    Shortcut format stored in config:
+      - Regular combo: ``<ctrl>+<shift>+v``
+      - Double-tap:    ``2x<ctrl>``
     """
 
-    shortcut_changed = Signal(str)  # emits the pynput-format string
+    shortcut_changed = Signal(str)  # emits the config-format string
 
-    # Qt modifier flags → (display name, pynput token)
-    _MODIFIER_MAP = [
-        (Qt.ControlModifier, "Ctrl", "<ctrl>"),
-        (Qt.ShiftModifier, "Shift", "<shift>"),
-        (Qt.AltModifier, "Alt", "<alt>"),
-        (Qt.MetaModifier, "Super", "<super>"),
-    ]
+    # Double-tap detection window (seconds)
+    _DOUBLE_TAP_MS = 400
 
-    # Qt key codes for modifier-only keys (we ignore these as the "main" key)
+    # Qt key codes that are modifier-only
     _MODIFIER_KEYS = {
         Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_AltGr,
         Qt.Key_Meta, Qt.Key_Super_L, Qt.Key_Super_R,
     }
 
-    # Mapping of special Qt keys → (display, pynput token)
-    _SPECIAL_KEYS: dict[int, tuple[str, str]] = {
+    # Qt key → (display name, config token)
+    _KEY_NAMES: dict[int, tuple[str, str]] = {
+        # Modifiers (used when they appear in combos or double-taps)
+        Qt.Key_Control: ("Ctrl", "<ctrl>"),
+        Qt.Key_Shift: ("Shift", "<shift>"),
+        Qt.Key_Alt: ("Alt", "<alt>"),
+        Qt.Key_AltGr: ("Alt", "<alt>"),
+        Qt.Key_Meta: ("Super", "<super>"),
+        Qt.Key_Super_L: ("Super", "<super>"),
+        Qt.Key_Super_R: ("Super", "<super>"),
+        # Function keys
         Qt.Key_F1: ("F1", "<f1>"), Qt.Key_F2: ("F2", "<f2>"),
         Qt.Key_F3: ("F3", "<f3>"), Qt.Key_F4: ("F4", "<f4>"),
         Qt.Key_F5: ("F5", "<f5>"), Qt.Key_F6: ("F6", "<f6>"),
         Qt.Key_F7: ("F7", "<f7>"), Qt.Key_F8: ("F8", "<f8>"),
         Qt.Key_F9: ("F9", "<f9>"), Qt.Key_F10: ("F10", "<f10>"),
         Qt.Key_F11: ("F11", "<f11>"), Qt.Key_F12: ("F12", "<f12>"),
+        # Special keys
         Qt.Key_Space: ("Space", "<space>"),
         Qt.Key_Return: ("Enter", "<enter>"),
         Qt.Key_Enter: ("Enter", "<enter>"),
@@ -323,26 +347,36 @@ class ShortcutCaptureInput(QLineEdit):
         self.setReadOnly(True)
         self.setAlignment(Qt.AlignCenter)
         self.setCursor(Qt.PointingHandCursor)
-        self._shortcut_str = ""  # pynput-compatible string
+        self.setPlaceholderText("Click here, then press a shortcut…")
+        self._shortcut_str = ""       # config-format string
         self._listening = False
-        self._update_placeholder()
+
+        # State for multi-key capture
+        self._held_keys: list[int] = []  # keys currently held, in press order
+        self._finalize_timer = QTimer(self)
+        self._finalize_timer.setSingleShot(True)
+        self._finalize_timer.timeout.connect(self._finalize_combo)
+
+        # State for double-tap detection
+        self._last_single_key: Optional[int] = None  # the key from the last single press
+        self._last_single_time: float = 0.0           # monotonic timestamp
+        self._double_tap_timer = QTimer(self)
+        self._double_tap_timer.setSingleShot(True)
+        self._double_tap_timer.timeout.connect(self._finalize_single_key)
 
     def shortcut_string(self) -> str:
-        """Return the stored pynput-format shortcut string."""
+        """Return the stored config-format shortcut string."""
         return self._shortcut_str
 
     def set_shortcut_string(self, shortcut_str: str) -> None:
-        """Set the shortcut from a pynput-format string and update display."""
+        """Set the shortcut from a config-format string and update display."""
         self._shortcut_str = shortcut_str
         if shortcut_str:
-            self.setText(self._pynput_to_display(shortcut_str))
+            self.setText(self._shortcut_to_display(shortcut_str))
         else:
             self.setText("")
         self._listening = False
         self._update_style()
-
-    def _update_placeholder(self) -> None:
-        self.setPlaceholderText("Click here, then press a shortcut…")
 
     def _update_style(self) -> None:
         if self._listening:
@@ -351,87 +385,203 @@ class ShortcutCaptureInput(QLineEdit):
                 "color: #6C63FF; font-weight: bold; }"
             )
         else:
-            self.setStyleSheet("")  # revert to global stylesheet
+            self.setStyleSheet("")
 
     def focusInEvent(self, event) -> None:
         super().focusInEvent(event)
         self._listening = True
+        self._held_keys.clear()
+        self._last_single_key = None
+        self._finalize_timer.stop()
+        self._double_tap_timer.stop()
         self.setText("Press a key combination…")
         self._update_style()
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
         self._listening = False
-        # Restore display text
+        self._finalize_timer.stop()
+        self._double_tap_timer.stop()
         if self._shortcut_str:
-            self.setText(self._pynput_to_display(self._shortcut_str))
+            self.setText(self._shortcut_to_display(self._shortcut_str))
         else:
             self.setText("")
         self._update_style()
+
+    def _key_info(self, qt_key: int, event=None) -> tuple[str, str] | None:
+        """Return (display_name, config_token) for a Qt key code."""
+        if qt_key in self._KEY_NAMES:
+            return self._KEY_NAMES[qt_key]
+        # Try the event text for printable characters
+        if event is not None:
+            text = event.text()
+            if text and text.isprintable():
+                ch = text.lower()
+                return (ch.upper(), ch)
+        # Last resort: QKeySequence
+        seq = QKeySequence(qt_key)
+        name = seq.toString()
+        if name:
+            return (name, f"<{name.lower()}>")
+        return None
 
     def keyPressEvent(self, event) -> None:
         if not self._listening:
             return
 
         key = event.key()
-        modifiers = event.modifiers()
 
-        # Escape → clear the shortcut
+        # Escape → clear shortcut
         if key == Qt.Key_Escape:
             self._shortcut_str = ""
+            self._held_keys.clear()
+            self._last_single_key = None
+            self._finalize_timer.stop()
+            self._double_tap_timer.stop()
             self.setText("")
             self.shortcut_changed.emit("")
             self.clearFocus()
             return
 
-        # Ignore bare modifier presses — wait for the actual key
-        if key in self._MODIFIER_KEYS:
+        # Ignore auto-repeat
+        if event.isAutoRepeat():
             return
 
-        # Build display and pynput strings
+        # Cancel any pending single-key finalization (we're building a combo)
+        self._double_tap_timer.stop()
+
+        # Track this key
+        if key not in self._held_keys:
+            self._held_keys.append(key)
+
+        # Show live preview of keys being held
+        self._show_held_preview()
+
+        # Restart the finalize timer — we wait a bit after the last keypress
+        # to allow the user to press additional keys
+        self._finalize_timer.start(300)
+
+    def keyReleaseEvent(self, event) -> None:
+        if not self._listening:
+            return
+        if event.isAutoRepeat():
+            return
+        # We don't remove from _held_keys on release — we want to capture
+        # the full set of keys that were held simultaneously.
+        # The finalize timer handles committing the combo.
+
+    def _show_held_preview(self) -> None:
+        """Show a live preview of the keys currently being held."""
+        parts = []
+        for k in self._held_keys:
+            info = self._key_info(k)
+            if info:
+                parts.append(info[0])
+        if parts:
+            self.setText(" + ".join(parts) + " …")
+
+    def _finalize_combo(self) -> None:
+        """Called after keys stop being pressed — commit the captured combo."""
+        if not self._held_keys:
+            return
+
+        import time
+
+        keys = list(self._held_keys)
+        self._held_keys.clear()
+
+        # Single key press — might be a double-tap
+        if len(keys) == 1:
+            key = keys[0]
+            now = time.monotonic()
+
+            if (self._last_single_key == key
+                    and (now - self._last_single_time) * 1000 < self._DOUBLE_TAP_MS):
+                # Double-tap detected!
+                self._last_single_key = None
+                info = self._key_info(key)
+                if info:
+                    disp, token = info
+                    self._shortcut_str = f"2x{token}"
+                    self.setText(f"{disp} × 2")
+                    self.shortcut_changed.emit(self._shortcut_str)
+                    self.clearFocus()
+                return
+
+            # First single press — wait to see if a second tap comes
+            self._last_single_key = key
+            self._last_single_time = now
+            info = self._key_info(key)
+            if info:
+                self.setText(f"{info[0]}  (tap again for double-tap, or wait…)")
+            self._double_tap_timer.start(self._DOUBLE_TAP_MS)
+            return
+
+        # Multi-key combo — commit immediately
+        self._last_single_key = None
+        self._commit_combo(keys)
+
+    def _finalize_single_key(self) -> None:
+        """Double-tap window expired — commit as a single-key shortcut."""
+        if self._last_single_key is None:
+            return
+        key = self._last_single_key
+        self._last_single_key = None
+        self._commit_combo([key])
+
+    def _commit_combo(self, keys: list[int]) -> None:
+        """Build the config string from a list of Qt key codes and commit."""
         display_parts = []
-        pynput_parts = []
+        token_parts = []
 
-        for qt_mod, disp_name, pynput_token in self._MODIFIER_MAP:
-            if modifiers & qt_mod:
-                display_parts.append(disp_name)
-                pynput_parts.append(pynput_token)
-
-        # Resolve the main key
-        if key in self._SPECIAL_KEYS:
-            disp, pynput_tok = self._SPECIAL_KEYS[key]
-            display_parts.append(disp)
-            pynput_parts.append(pynput_tok)
-        else:
-            text = event.text()
-            if text and text.isprintable():
-                ch = text.lower()
-                display_parts.append(ch.upper())
-                pynput_parts.append(ch)
+        # Sort: modifiers first, then other keys, preserving order within groups
+        modifier_keys = []
+        regular_keys = []
+        for k in keys:
+            if k in self._MODIFIER_KEYS:
+                modifier_keys.append(k)
             else:
-                # Unknown key — try to get a name from QKeySequence
-                seq = QKeySequence(key)
-                name = seq.toString()
-                if name:
-                    display_parts.append(name)
-                    pynput_parts.append(f"<{name.lower()}>")
-                else:
-                    return  # unrecognised key, ignore
+                regular_keys.append(k)
+
+        for k in modifier_keys + regular_keys:
+            info = self._key_info(k)
+            if info:
+                display_parts.append(info[0])
+                token_parts.append(info[1])
+
+        if not token_parts:
+            return
 
         display_text = " + ".join(display_parts)
-        pynput_text = "+".join(pynput_parts)
+        config_text = "+".join(token_parts)
 
-        self._shortcut_str = pynput_text
+        self._shortcut_str = config_text
         self.setText(display_text)
-        self.shortcut_changed.emit(pynput_text)
+        self.shortcut_changed.emit(config_text)
         self.clearFocus()
 
     @staticmethod
-    def _pynput_to_display(shortcut_str: str) -> str:
-        """Convert a pynput-format shortcut string to a nice display label."""
+    def _shortcut_to_display(shortcut_str: str) -> str:
+        """Convert a config-format shortcut string to a nice display label."""
         if not shortcut_str:
             return ""
-        token_display = {
+
+        # Handle double-tap format: "2x<token>"
+        if shortcut_str.startswith("2x"):
+            inner = shortcut_str[2:]
+            inner_disp = ShortcutCaptureInput._token_to_display(inner)
+            return f"{inner_disp} × 2"
+
+        parts = shortcut_str.split("+")
+        display_parts = []
+        for part in parts:
+            display_parts.append(ShortcutCaptureInput._token_to_display(part.strip()))
+        return " + ".join(display_parts)
+
+    @staticmethod
+    def _token_to_display(token: str) -> str:
+        """Convert a single config token to display text."""
+        _map = {
             "<ctrl>": "Ctrl", "<shift>": "Shift", "<alt>": "Alt",
             "<super>": "Super", "<cmd>": "Super",
             "<space>": "Space", "<enter>": "Enter", "<tab>": "Tab",
@@ -444,20 +594,14 @@ class ShortcutCaptureInput(QLineEdit):
             "<caps_lock>": "CapsLock", "<num_lock>": "NumLock",
         }
         for i in range(1, 13):
-            token_display[f"<f{i}>"] = f"F{i}"
+            _map[f"<f{i}>"] = f"F{i}"
 
-        parts = shortcut_str.split("+")
-        display_parts = []
-        for part in parts:
-            part_stripped = part.strip()
-            lower = part_stripped.lower()
-            if lower in token_display:
-                display_parts.append(token_display[lower])
-            elif len(part_stripped) == 1:
-                display_parts.append(part_stripped.upper())
-            else:
-                display_parts.append(part_stripped)
-        return " + ".join(display_parts)
+        lower = token.lower()
+        if lower in _map:
+            return _map[lower]
+        if len(token) == 1:
+            return token.upper()
+        return token
 
 
 class SignalBridge(QObject):
@@ -636,6 +780,7 @@ class MainWindow(QMainWindow):
     def set_recording_state(self, recording: bool) -> None:
         """Update UI to reflect recording state."""
         self.record_btn.recording = recording
+        self.audio_level.recording = recording
         if recording:
             self.status_label.setProperty("recording", "true")
             self.status_label.setText("🔴 Recording... speak now")

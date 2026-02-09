@@ -85,6 +85,7 @@ class AudioRecorder:
         self.device: Optional[int] = device  # None = system default
         self._stream: Optional[sd.InputStream] = None
         self._recording = False
+        self._previewing = False
         self._device_rate: int = TARGET_RATE  # actual rate the device opened at
 
         # Callbacks
@@ -95,10 +96,14 @@ class AudioRecorder:
     def is_recording(self) -> bool:
         return self._recording
 
-    def start(self) -> None:
-        """Start recording audio from the selected (or default) microphone."""
-        if self._recording:
-            return
+    @property
+    def is_previewing(self) -> bool:
+        return self._previewing
+
+    def _open_stream(self) -> None:
+        """Open the microphone input stream (shared by preview and recording)."""
+        if self._stream is not None:
+            return  # already open
 
         device = self.device  # None means system default
 
@@ -143,21 +148,59 @@ class AudioRecorder:
                 TARGET_RATE,
             )
 
-        self._recording = True
         self._stream.start()
 
-    def stop(self) -> None:
-        """Stop recording."""
-        if not self._recording:
-            return
-        self._recording = False
+    def _close_stream(self) -> None:
+        """Close the microphone input stream."""
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
 
+    def start_preview(self) -> None:
+        """Open the mic stream for level monitoring only (no audio chunks)."""
+        if self._previewing or self._recording:
+            return
+        self._open_stream()
+        self._previewing = True
+
+    def stop_preview(self) -> None:
+        """Stop the level-monitoring preview."""
+        if not self._previewing:
+            return
+        self._previewing = False
+        if not self._recording:
+            self._close_stream()
+
+    def start(self) -> None:
+        """Start recording audio from the selected (or default) microphone."""
+        if self._recording:
+            return
+
+        # If preview is already running, reuse the stream; otherwise open one.
+        self._open_stream()
+
+        self._recording = True
+
+    def stop(self) -> None:
+        """Stop recording (keeps preview alive if it was active)."""
+        if not self._recording:
+            return
+        self._recording = False
+        if not self._previewing:
+            self._close_stream()
+
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         """Called by sounddevice for each audio block."""
+        if not self._recording and not self._previewing:
+            return
+
+        # Report audio level for UI visualization (always, even in preview)
+        if self.on_level:
+            level = float(np.abs(indata).mean()) / 32768.0
+            self.on_level(level)
+
+        # Only forward PCM chunks when actually recording
         if not self._recording:
             return
 
@@ -170,8 +213,3 @@ class AudioRecorder:
         # Send raw PCM16 bytes to the transcriber
         if self.on_audio_chunk:
             self.on_audio_chunk(pcm.tobytes())
-
-        # Report audio level for UI visualization
-        if self.on_level:
-            level = float(np.abs(indata).mean()) / 32768.0
-            self.on_level(level)

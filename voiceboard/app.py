@@ -74,6 +74,9 @@ class VoiceBoardApp:
         # Setup hotkeys
         self._setup_hotkeys()
 
+        # Start microphone preview (level meter only, no transcription)
+        self._start_mic_preview()
+
         # Show or minimize
         if self.config.start_minimized:
             self.window.hide()
@@ -81,6 +84,19 @@ class VoiceBoardApp:
             self.window.show()
 
         return self.qt_app.exec()
+
+    def _start_mic_preview(self) -> None:
+        """Start the microphone preview stream for level monitoring."""
+        try:
+            selected = self.window.selected_device_index()
+            self.recorder.device = int(selected) if selected else None
+            self.recorder.start_preview()
+        except Exception:
+            pass  # silently ignore — preview is non-critical
+
+    def _stop_mic_preview(self) -> None:
+        """Stop the microphone preview stream."""
+        self.recorder.stop_preview()
 
     def _refresh_mic_list(self) -> None:
         """Re-scan audio input devices and update the UI dropdown."""
@@ -137,9 +153,13 @@ class VoiceBoardApp:
         self.tray.setIcon(svg_to_icon(TRAY_ICON_RECORDING_SVG))
         self.tray.setToolTip("VoiceBoard — Recording...")
 
-        # Apply the currently selected microphone device
+        # Check if the selected mic changed since the preview started
         selected = self.window.selected_device_index()
-        self.recorder.device = int(selected) if selected else None
+        new_device = int(selected) if selected else None
+        if new_device != self.recorder.device:
+            # Restart the stream on the new device
+            self._stop_mic_preview()
+            self.recorder.device = new_device
 
         # Start the realtime WebSocket transcription session
         self.transcriber.start()
@@ -155,7 +175,9 @@ class VoiceBoardApp:
         self.window.set_recording_state(False)
         self.tray.setIcon(svg_to_icon(TRAY_ICON_SVG))
         self.tray.setToolTip("VoiceBoard — Voice Keyboard")
-        self.window.audio_level.set_level(0)
+
+        # Restart mic preview so the level meter keeps showing
+        self._start_mic_preview()
 
     def _on_audio_chunk(self, pcm_bytes: bytes) -> None:
         """Forward audio chunk from the recorder to the transcriber."""
