@@ -26,8 +26,8 @@ CONFIG_FILE = _config_dir() / "config.json"
 @dataclass
 class AppConfig:
     soniox_api_key: str = ""
-    toggle_shortcut: str = "<ctrl>+<shift>+v"
-    ptt_shortcut: str = "<ctrl>+<shift>+b"
+    toggle_shortcut: str = "<alt>+x"
+    ptt_shortcut: str = "<f8>"
     language: str = ""
     input_device: str = ""  # empty = system default
     start_minimized: bool = False
