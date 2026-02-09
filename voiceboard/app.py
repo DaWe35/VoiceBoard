@@ -1,7 +1,6 @@
 """Main application logic for VoiceBoard — wires all modules together."""
 
 import sys
-import threading
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QTimer
@@ -9,7 +8,7 @@ from PySide6.QtCore import QTimer
 from voiceboard.config import AppConfig
 from voiceboard.audio import AudioRecorder, list_input_devices
 from voiceboard.transcriber import RealtimeTranscriber
-from voiceboard.typer import type_text
+from voiceboard.typer import enqueue_text
 from voiceboard.hotkeys import HotkeyManager
 from voiceboard.ui import MainWindow, create_tray_icon, svg_to_icon, STYLESHEET
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
@@ -161,9 +160,11 @@ class VoiceBoardApp:
         """Handle incremental transcription text — type it in real-time
         and update the live preview."""
         self.window.append_live_text(delta)
-        # Type each delta immediately into the focused input field
-        # (runs in a background thread so the Qt event loop isn't blocked)
-        threading.Thread(target=type_text, args=(delta,), daemon=True).start()
+        # Queue the delta for typing on a persistent background thread.
+        # (A single worker thread avoids the Windows bug where spawning a
+        # new thread per delta causes the pynput keyboard hook to time out
+        # and drop injected keystrokes after the first word.)
+        enqueue_text(delta)
 
     def _on_turn_started(self) -> None:
         """A new speech turn was detected — reset the live preview."""

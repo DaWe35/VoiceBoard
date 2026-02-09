@@ -13,6 +13,7 @@ Text is injected in real-time as transcription deltas arrive.
 import logging
 import os
 import platform
+import queue
 import threading
 import time
 from typing import Optional
@@ -281,6 +282,51 @@ def _get_typer():
         return _typer
 
 
+# ── Persistent typing worker ───────────────────────────────────
+
+class _TypingWorker:
+    """Serialises typing requests on a single persistent background thread.
+
+    Spawning a new OS thread for every transcription delta is expensive and,
+    on Windows, causes the pynput low-level keyboard hook to exceed its
+    timeout — making Windows silently drop injected keystrokes after the
+    first word.  A single long-lived worker thread avoids this entirely.
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue[Optional[str]] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def enqueue(self, text: str) -> None:
+        """Schedule *text* to be typed.  Returns immediately."""
+        self._queue.put(text)
+
+    def _run(self) -> None:
+        while True:
+            text = self._queue.get()
+            if text is None:        # poison pill → shut down
+                break
+            if text:
+                _get_typer().type_text(text)
+
+
+_worker: Optional[_TypingWorker] = None
+_worker_lock = threading.Lock()
+
+
+def _get_worker() -> _TypingWorker:
+    """Lazily create the singleton typing worker."""
+    global _worker
+    if _worker is not None:
+        return _worker
+    with _worker_lock:
+        if _worker is not None:
+            return _worker
+        _worker = _TypingWorker()
+        return _worker
+
+
 # ── Public API ─────────────────────────────────────────────────
 
 def type_text(text: str) -> None:
@@ -293,3 +339,18 @@ def type_text(text: str) -> None:
     if not text:
         return
     _get_typer().type_text(text)
+
+
+def enqueue_text(text: str) -> None:
+    """Queue *text* to be typed on a persistent background thread.
+
+    Unlike :func:`type_text` (which types synchronously on the calling
+    thread), this function returns immediately and the actual keystroke
+    injection happens on a single long-lived worker thread.  This avoids
+    the overhead of spawning a new OS thread per delta and — critically
+    on Windows — prevents the pynput keyboard hook from timing out and
+    dropping injected keystrokes.
+    """
+    if not text:
+        return
+    _get_worker().enqueue(text)
