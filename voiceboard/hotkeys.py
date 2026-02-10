@@ -157,6 +157,41 @@ def _init_modifier_pairs():
         pass
 
 
+# ── Linux session detection ────────────────────────────────────
+
+_SESSION_TYPE: Optional[str] = None
+
+if _SYSTEM == "Linux":
+    _SESSION_TYPE = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    if not _SESSION_TYPE:
+        _SESSION_TYPE = "wayland" if os.environ.get("WAYLAND_DISPLAY") else "x11"
+
+
+def _evdev_has_devices() -> bool:
+    """Check if we can open any keyboard devices via evdev."""
+    try:
+        import evdev
+        from evdev import ecodes
+
+        for path in evdev.list_devices():
+            try:
+                dev = evdev.InputDevice(path)
+                caps = dev.capabilities()
+                has_keys = (
+                    ecodes.EV_KEY in caps
+                    and ecodes.KEY_A in caps[ecodes.EV_KEY]
+                    and ecodes.KEY_Z in caps[ecodes.EV_KEY]
+                )
+                dev.close()
+                if has_keys:
+                    return True
+            except (PermissionError, OSError):
+                continue
+    except ImportError:
+        pass
+    return False
+
+
 # ── Linux evdev backend ────────────────────────────────────────
 
 class _EvdevHotkeyListener:
@@ -559,8 +594,21 @@ class HotkeyManager:
 
     def __init__(self):
         if _SYSTEM == "Linux":
-            self._backend = _EvdevHotkeyListener()
-            log.info("Using evdev backend for global hotkeys")
+            if _evdev_has_devices():
+                self._backend = _EvdevHotkeyListener()
+                log.info("Using evdev backend for global hotkeys")
+            else:
+                self._backend = _PynputHotkeyListener()
+                if _SESSION_TYPE == "wayland":
+                    log.warning(
+                        "Cannot access /dev/input (evdev) — falling back to pynput. "
+                        "Global hotkeys may not work under Wayland without input group access. "
+                        "Fix: sudo usermod -aG input $USER  (then re-login)"
+                    )
+                else:
+                    log.info(
+                        "Using pynput backend for global hotkeys (evdev unavailable)"
+                    )
         else:
             self._backend = _PynputHotkeyListener()
             log.info("Using pynput backend for global hotkeys")
