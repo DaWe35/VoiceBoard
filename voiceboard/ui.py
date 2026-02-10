@@ -326,23 +326,27 @@ class ShortcutCaptureInput(QLineEdit):
     """A line-edit that captures key combinations when focused.
 
     Supports:
-      - Modifier combos: Ctrl+Shift+V
-      - Any-key combos: Space+B, A+S
-      - Double-tap: press the same single key twice quickly → "2× Ctrl"
-      - Single non-modifier keys: F5, Pause, etc.
+      - Simultaneous combos: Ctrl+Shift+V, Space+B, A+S
+      - Sequential combos (incl. double-tap): press one key/chord,
+        release, press a second key/chord  → ``a,b`` or ``<ctrl>,<ctrl>``
 
-    Click the field → it enters "listening" mode → press a key combo →
-    it gets recorded.  Press Escape to clear.
+    Click the field → it enters "listening" mode → press keys →
+    they get recorded.  Press Escape to clear.
 
-    Shortcut format stored in config:
-      - Regular combo: ``<ctrl>+<shift>+v``
-      - Double-tap:    ``2x<ctrl>``
+    Config format examples:
+      ``<ctrl>+<shift>+v``   (simultaneous)
+      ``<ctrl>,<ctrl>``      (sequential / double-tap)
+      ``a,b``                (sequential, two different keys)
     """
 
     shortcut_changed = Signal(str)  # emits the config-format string
 
-    # Double-tap detection window (seconds)
-    _DOUBLE_TAP_MS = 400
+    # How long (ms) to wait after all keys are released before treating
+    # the chord as complete.  Gives the user time to press extra keys.
+    _RELEASE_GRACE_MS = 80
+
+    # How long (ms) to wait for the second chord in a sequential combo.
+    _SEQ_WINDOW_MS = 800
 
     # Qt key codes that are modifier-only
     _MODIFIER_KEYS = {
@@ -352,7 +356,7 @@ class ShortcutCaptureInput(QLineEdit):
 
     # Qt key → (display name, config token)
     _KEY_NAMES: dict[int, tuple[str, str]] = {
-        # Modifiers (used when they appear in combos or double-taps)
+        # Modifiers
         Qt.Key_Control: ("Ctrl", "<ctrl>"),
         Qt.Key_Shift: ("Shift", "<shift>"),
         Qt.Key_Alt: ("Alt", "<alt>"),
@@ -399,18 +403,23 @@ class ShortcutCaptureInput(QLineEdit):
         self._shortcut_str = ""       # config-format string
         self._listening = False
 
-        # State for multi-key capture
-        self._held_keys: list[int] = []  # keys currently held, in press order
-        self._finalize_timer = QTimer(self)
-        self._finalize_timer.setSingleShot(True)
-        self._finalize_timer.timeout.connect(self._finalize_combo)
+        # ── Chord capture state ──
+        self._held_keys: set[int] = set()   # keys currently physically held
+        self._chord_keys: list[int] = []    # all keys seen in the current chord
+        self._pressing = False              # True while at least one key is held
 
-        # State for double-tap detection
-        self._last_single_key: Optional[int] = None  # the key from the last single press
-        self._last_single_time: float = 0.0           # monotonic timestamp
-        self._double_tap_timer = QTimer(self)
-        self._double_tap_timer.setSingleShot(True)
-        self._double_tap_timer.timeout.connect(self._finalize_single_key)
+        # Short grace timer — after ALL keys are released, wait a tiny bit
+        # in case the user is still rolling off a chord.
+        self._release_timer = QTimer(self)
+        self._release_timer.setSingleShot(True)
+        self._release_timer.timeout.connect(self._on_chord_complete)
+
+        # ── Sequential capture state ──
+        self._first_chord: Optional[list[int]] = None  # keys from the first chord
+        self._waiting_for_second = False
+        self._seq_timer = QTimer(self)
+        self._seq_timer.setSingleShot(True)
+        self._seq_timer.timeout.connect(self._on_seq_timeout)
 
     def shortcut_string(self) -> str:
         """Return the stored config-format shortcut string."""
@@ -435,21 +444,26 @@ class ShortcutCaptureInput(QLineEdit):
         else:
             self.setStyleSheet("")
 
+    def _reset_capture_state(self) -> None:
+        self._held_keys.clear()
+        self._chord_keys.clear()
+        self._pressing = False
+        self._release_timer.stop()
+        self._first_chord = None
+        self._waiting_for_second = False
+        self._seq_timer.stop()
+
     def focusInEvent(self, event) -> None:
         super().focusInEvent(event)
         self._listening = True
-        self._held_keys.clear()
-        self._last_single_key = None
-        self._finalize_timer.stop()
-        self._double_tap_timer.stop()
+        self._reset_capture_state()
         self.setText("Press a key combination…")
         self._update_style()
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
         self._listening = False
-        self._finalize_timer.stop()
-        self._double_tap_timer.stop()
+        self._reset_capture_state()
         if self._shortcut_str:
             self.setText(self._shortcut_to_display(self._shortcut_str))
         else:
@@ -460,12 +474,22 @@ class ShortcutCaptureInput(QLineEdit):
         """Return (display_name, config_token) for a Qt key code."""
         if qt_key in self._KEY_NAMES:
             return self._KEY_NAMES[qt_key]
+
+        # Direct mapping for A-Z and 0-9 so we never depend on event.text()
+        if Qt.Key_A <= qt_key <= Qt.Key_Z:
+            ch = chr(qt_key).lower()
+            return (ch.upper(), ch)
+        if Qt.Key_0 <= qt_key <= Qt.Key_9:
+            ch = chr(qt_key)
+            return (ch, ch)
+
         # Try the event text for printable characters
         if event is not None:
             text = event.text()
             if text and text.isprintable():
                 ch = text.lower()
                 return (ch.upper(), ch)
+
         # Last resort: QKeySequence
         seq = QKeySequence(qt_key)
         name = seq.toString()
@@ -482,10 +506,7 @@ class ShortcutCaptureInput(QLineEdit):
         # Escape → clear shortcut
         if key == Qt.Key_Escape:
             self._shortcut_str = ""
-            self._held_keys.clear()
-            self._last_single_key = None
-            self._finalize_timer.stop()
-            self._double_tap_timer.stop()
+            self._reset_capture_state()
             self.setText("")
             self.shortcut_changed.emit("")
             self.clearFocus()
@@ -495,118 +516,129 @@ class ShortcutCaptureInput(QLineEdit):
         if event.isAutoRepeat():
             return
 
-        # Cancel any pending single-key finalization (we're building a combo)
-        self._double_tap_timer.stop()
+        # Stop the release grace timer — another key is being pressed
+        self._release_timer.stop()
 
-        # Track this key
-        if key not in self._held_keys:
-            self._held_keys.append(key)
+        self._pressing = True
+        self._held_keys.add(key)
+        if key not in self._chord_keys:
+            self._chord_keys.append(key)
 
         # Show live preview of keys being held
         self._show_held_preview()
-
-        # Restart the finalize timer — we wait a bit after the last keypress
-        # to allow the user to press additional keys
-        self._finalize_timer.start(300)
 
     def keyReleaseEvent(self, event) -> None:
         if not self._listening:
             return
         if event.isAutoRepeat():
             return
-        # We don't remove from _held_keys on release — we want to capture
-        # the full set of keys that were held simultaneously.
-        # The finalize timer handles committing the combo.
+
+        key = event.key()
+        self._held_keys.discard(key)
+
+        if not self._held_keys and self._pressing:
+            # All keys released — start the grace timer
+            self._pressing = False
+            self._release_timer.start(self._RELEASE_GRACE_MS)
 
     def _show_held_preview(self) -> None:
-        """Show a live preview of the keys currently being held."""
-        parts = []
-        for k in self._held_keys:
-            info = self._key_info(k)
-            if info:
-                parts.append(info[0])
+        """Show a live preview of the keys currently being pressed."""
+        parts = self._keys_display(self._chord_keys)
+        prefix = ""
+        if self._first_chord is not None:
+            first_parts = self._keys_display(self._first_chord)
+            prefix = " + ".join(first_parts) + " , "
         if parts:
-            self.setText(" + ".join(parts) + " …")
+            self.setText(prefix + " + ".join(parts) + " …")
 
-    def _finalize_combo(self) -> None:
-        """Called after keys stop being pressed — commit the captured combo."""
-        if not self._held_keys:
+    def _on_chord_complete(self) -> None:
+        """Called after the grace period when a chord is fully released."""
+        keys = list(self._chord_keys)
+        self._chord_keys.clear()
+
+        if not keys:
             return
 
-        import time
-
-        keys = list(self._held_keys)
-        self._held_keys.clear()
-
-        # Single key press — might be a double-tap
-        if len(keys) == 1:
-            key = keys[0]
-            now = time.monotonic()
-
-            if (self._last_single_key == key
-                    and (now - self._last_single_time) * 1000 < self._DOUBLE_TAP_MS):
-                # Double-tap detected!
-                self._last_single_key = None
-                info = self._key_info(key)
-                if info:
-                    disp, token = info
-                    self._shortcut_str = f"2x{token}"
-                    self.setText(f"{disp} × 2")
-                    self.shortcut_changed.emit(self._shortcut_str)
-                    self.clearFocus()
-                return
-
-            # First single press — wait to see if a second tap comes
-            self._last_single_key = key
-            self._last_single_time = now
-            info = self._key_info(key)
-            if info:
-                self.setText(f"{info[0]}  (tap again for double-tap, or wait…)")
-            self._double_tap_timer.start(self._DOUBLE_TAP_MS)
+        if self._waiting_for_second:
+            # This is the SECOND chord → commit as sequential
+            self._seq_timer.stop()
+            self._waiting_for_second = False
+            first = self._first_chord or []
+            self._first_chord = None
+            self._commit_sequential(first, keys)
             return
 
-        # Multi-key combo — commit immediately
-        self._last_single_key = None
-        self._commit_combo(keys)
+        # First chord received — wait to see if a second chord follows
+        self._first_chord = keys
+        self._waiting_for_second = True
 
-    def _finalize_single_key(self) -> None:
-        """Double-tap window expired — commit as a single-key shortcut."""
-        if self._last_single_key is None:
-            return
-        key = self._last_single_key
-        self._last_single_key = None
-        self._commit_combo([key])
+        first_display = self._keys_display(keys)
+        self.setText(" + ".join(first_display) + "  (press another key for sequence, or wait…)")
+        self._seq_timer.start(self._SEQ_WINDOW_MS)
 
-    def _commit_combo(self, keys: list[int]) -> None:
-        """Build the config string from a list of Qt key codes and commit."""
-        display_parts = []
-        token_parts = []
+    def _on_seq_timeout(self) -> None:
+        """Sequential window expired — commit the first chord as a regular combo."""
+        self._waiting_for_second = False
+        first = self._first_chord
+        self._first_chord = None
+        if first:
+            self._commit_combo(first)
 
-        # Sort: modifiers first, then other keys, preserving order within groups
-        modifier_keys = []
-        regular_keys = []
-        for k in keys:
-            if k in self._MODIFIER_KEYS:
-                modifier_keys.append(k)
-            else:
-                regular_keys.append(k)
-
-        for k in modifier_keys + regular_keys:
-            info = self._key_info(k)
-            if info:
-                display_parts.append(info[0])
-                token_parts.append(info[1])
-
-        if not token_parts:
+    def _commit_sequential(self, first_keys: list[int], second_keys: list[int]) -> None:
+        """Commit a sequential shortcut (two chords separated by comma)."""
+        first_parts = self._keys_to_parts(first_keys)
+        second_parts = self._keys_to_parts(second_keys)
+        if not first_parts or not second_parts:
             return
 
-        display_text = " + ".join(display_parts)
-        config_text = "+".join(token_parts)
+        first_tokens = "+".join(t for _, t in first_parts)
+        second_tokens = "+".join(t for _, t in second_parts)
+        config_text = f"{first_tokens},{second_tokens}"
+
+        first_display = " + ".join(d for d, _ in first_parts)
+        second_display = " + ".join(d for d, _ in second_parts)
+        display_text = f"{first_display} , {second_display}"
 
         self._shortcut_str = config_text
         self.setText(display_text)
         self.shortcut_changed.emit(config_text)
         self.clearFocus()
+
+    def _commit_combo(self, keys: list[int]) -> None:
+        """Build the config string from a list of Qt key codes and commit."""
+        parts = self._keys_to_parts(keys)
+        if not parts:
+            return
+
+        display_text = " + ".join(d for d, _ in parts)
+        config_text = "+".join(t for _, t in parts)
+
+        self._shortcut_str = config_text
+        self.setText(display_text)
+        self.shortcut_changed.emit(config_text)
+        self.clearFocus()
+
+    def _keys_to_parts(self, keys: list[int]) -> list[tuple[str, str]]:
+        """Return [(display, token), ...] sorted with modifiers first."""
+        mods = []
+        rest = []
+        for k in keys:
+            info = self._key_info(k)
+            if info:
+                if k in self._MODIFIER_KEYS:
+                    mods.append(info)
+                else:
+                    rest.append(info)
+        return mods + rest
+
+    def _keys_display(self, keys: list[int]) -> list[str]:
+        """Return display names for a list of keys."""
+        result = []
+        for k in keys:
+            info = self._key_info(k)
+            if info:
+                result.append(info[0])
+        return result
 
     @staticmethod
     def _shortcut_to_display(shortcut_str: str) -> str:
@@ -614,13 +646,25 @@ class ShortcutCaptureInput(QLineEdit):
         if not shortcut_str:
             return ""
 
-        # Handle double-tap format: "2x<token>"
+        # Handle legacy "2x<token>" format
         if shortcut_str.startswith("2x"):
             inner = shortcut_str[2:]
             inner_disp = ShortcutCaptureInput._token_to_display(inner)
-            return f"{inner_disp} × 2"
+            return f"{inner_disp} , {inner_disp}"
 
-        parts = shortcut_str.split("+")
+        # Sequential combo — "a,b" or "<ctrl>,<ctrl>"
+        if "," in shortcut_str:
+            halves = shortcut_str.split(",", 1)
+            left = ShortcutCaptureInput._combo_to_display(halves[0])
+            right = ShortcutCaptureInput._combo_to_display(halves[1])
+            return f"{left} , {right}"
+
+        return ShortcutCaptureInput._combo_to_display(shortcut_str)
+
+    @staticmethod
+    def _combo_to_display(combo_str: str) -> str:
+        """Convert a simultaneous combo portion to display text."""
+        parts = combo_str.split("+")
         display_parts = []
         for part in parts:
             display_parts.append(ShortcutCaptureInput._token_to_display(part.strip()))
@@ -730,8 +774,35 @@ class SettingsPage(QWidget):
         self.toggle_input = ShortcutCaptureInput()
         shortcut_layout.addRow("Toggle (start/stop):", self.toggle_input)
 
+        self._toggle_warn = QLabel()
+        self._toggle_warn.setWordWrap(True)
+        self._toggle_warn.setTextFormat(Qt.RichText)
+        self._toggle_warn.hide()
+        shortcut_layout.addRow("", self._toggle_warn)
+
         self.ptt_input = ShortcutCaptureInput()
         shortcut_layout.addRow("Push-to-talk (hold):", self.ptt_input)
+
+        self._ptt_warn = QLabel()
+        self._ptt_warn.setWordWrap(True)
+        self._ptt_warn.setTextFormat(Qt.RichText)
+        self._ptt_warn.hide()
+        shortcut_layout.addRow("", self._ptt_warn)
+
+        # Style for warning labels
+        _warn_style = (
+            "QLabel { color: #FFD580; font-size: 11px; "
+            "background-color: #2a2210; border: 1px solid #665520; "
+            "border-radius: 4px; padding: 4px 8px; }"
+        )
+        self._toggle_warn.setStyleSheet(_warn_style)
+        self._ptt_warn.setStyleSheet(_warn_style)
+
+        # Update warnings when shortcuts change
+        self.toggle_input.shortcut_changed.connect(
+            lambda s: self._update_shortcut_warning(s, self._toggle_warn))
+        self.ptt_input.shortcut_changed.connect(
+            lambda s: self._update_shortcut_warning(s, self._ptt_warn))
 
         shortcut_group.setLayout(shortcut_layout)
         layout.addWidget(shortcut_group)
@@ -825,6 +896,22 @@ class SettingsPage(QWidget):
         data = self.mic_combo.currentData()
         return data if data else ""
 
+    def _update_shortcut_warning(self, shortcut_str: str, label: QLabel) -> None:
+        """Show/hide a Wayland-specific warning for *shortcut_str*."""
+        from voiceboard.hotkeys import needs_evdev, is_wayland_without_evdev
+
+        if shortcut_str and needs_evdev(shortcut_str) and is_wayland_without_evdev():
+            label.setText(
+                "<b>⚠ This shortcut won't work</b> on your current setup "
+                "(Wayland without <code>evdev</code> access).<br>"
+                "Use a modifier-based combo (e.g. <b>Ctrl+Shift+V</b>) "
+                "or grant evdev access: "
+                "<code>sudo usermod -aG input $USER</code> then re-login."
+            )
+            label.show()
+        else:
+            label.hide()
+
     def load_config(self, config) -> None:
         """Populate settings fields from config object."""
         self.api_key_input.setText(config.soniox_api_key)
@@ -832,6 +919,10 @@ class SettingsPage(QWidget):
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
         self.language_input.setCurrentText(config.language)
         self.auto_start_cb.setChecked(config.auto_start)
+
+        # Show warnings if needed for loaded shortcuts
+        self._update_shortcut_warning(config.toggle_shortcut, self._toggle_warn)
+        self._update_shortcut_warning(config.ptt_shortcut, self._ptt_warn)
 
     def save_to_config(self, config) -> None:
         """Write settings field values back to config object."""

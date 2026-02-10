@@ -5,8 +5,10 @@ Platform strategies:
   - macOS / Windows → pynput keyboard Listener
 
 Shortcut format:
-  - Regular combo: ``<ctrl>+<shift>+v``, ``<space>+b``
-  - Double-tap:    ``2x<ctrl>``, ``2xb``
+  - Simultaneous combo:  ``<ctrl>+<shift>+v``, ``<space>+b``
+  - Sequential combo:    ``<ctrl>,<ctrl>``  (double-tap Ctrl)
+                         ``a,b``            (press A then B)
+  - Legacy ``2x<ctrl>`` is accepted and converted to ``<ctrl>,<ctrl>``.
 """
 
 import logging
@@ -15,54 +17,84 @@ import platform
 import select
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
 _SYSTEM = platform.system()
 
-# Double-tap detection window (seconds)
-_DOUBLE_TAP_WINDOW = 0.4
+# Time window (seconds) for the second press of a sequential shortcut.
+_SEQ_WINDOW = 0.6
 
 
-# ── Shortcut config representation ────────────────────────────
+# ── Shortcut config ───────────────────────────────────────────
 
+@dataclass
 class _ShortcutConfig:
-    """Parsed shortcut — either a key combo or a double-tap."""
+    """Parsed shortcut.
 
-    def __init__(self):
-        self.combo: set = set()        # set of key codes for a combo
-        self.double_tap_key = None     # single key code for double-tap (or None)
+    *combo*     – frozenset of key codes that must ALL be held simultaneously.
+    *seq_keys*  – tuple(first_key, second_key) for a sequential shortcut.
+
+    Exactly one of them is non-empty for a valid shortcut.
+    """
+    combo: frozenset = field(default_factory=frozenset)
+    seq_keys: tuple = ()          # (first_key_code, second_key_code)
 
     @property
-    def is_double_tap(self) -> bool:
-        return self.double_tap_key is not None
+    def is_sequential(self) -> bool:
+        return len(self.seq_keys) == 2
+
+    @property
+    def is_combo(self) -> bool:
+        return bool(self.combo)
 
     @property
     def is_empty(self) -> bool:
-        return not self.combo and self.double_tap_key is None
+        return not self.combo and not self.seq_keys
 
 
-def _is_double_tap_str(shortcut_str: str) -> tuple[bool, str]:
-    """Check if shortcut_str is a double-tap format.  Returns (is_dt, inner_token)."""
+def _normalize_shortcut_str(shortcut_str: str) -> str:
+    """Convert legacy ``2x<token>`` to sequential ``<token>,<token>``."""
     if shortcut_str.startswith("2x"):
-        return True, shortcut_str[2:]
-    return False, shortcut_str
+        token = shortcut_str[2:]
+        return f"{token},{token}"
+    return shortcut_str
 
 
-# ── Shortcut string parsing: evdev ─────────────────────────────
+# ── Per-shortcut runtime state ────────────────────────────────
 
-def _parse_shortcut_evdev(shortcut_str: str) -> _ShortcutConfig:
-    """Parse a config-format shortcut string into an evdev _ShortcutConfig."""
+class _SeqState:
+    """Tracks the state machine for ONE sequential shortcut.
+
+    Each sequential shortcut gets its own instance so they don't
+    interfere with each other.
+    """
+
+    def __init__(self):
+        self.armed = False        # True after the first key was pressed
+        self.armed_time: float = 0.0
+
+    def reset(self):
+        self.armed = False
+        self.armed_time = 0.0
+
+
+# ── Shortcut string parsing: evdev ────────────────────────────
+
+# Maps built lazily on first call and cached at module level.
+_evdev_token_map: Optional[dict] = None
+_evdev_char_map: Optional[dict] = None
+
+
+def _build_evdev_maps():
+    global _evdev_token_map, _evdev_char_map
+    if _evdev_token_map is not None:
+        return
     from evdev import ecodes
 
-    cfg = _ShortcutConfig()
-    if not shortcut_str:
-        return cfg
-
-    is_dt, inner = _is_double_tap_str(shortcut_str)
-
-    _TOKEN_MAP: dict[str, list[int]] = {
+    _evdev_token_map = {
         "<ctrl>": [ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL],
         "<shift>": [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT],
         "<alt>": [ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT],
@@ -89,62 +121,78 @@ def _parse_shortcut_evdev(shortcut_str: str) -> _ShortcutConfig:
         "<num_lock>": [ecodes.KEY_NUMLOCK],
     }
     for i in range(1, 13):
-        _TOKEN_MAP[f"<f{i}>"] = [getattr(ecodes, f"KEY_F{i}")]
+        _evdev_token_map[f"<f{i}>"] = [getattr(ecodes, f"KEY_F{i}")]
 
-    _CHAR_MAP: dict[str, int] = {}
+    _evdev_char_map = {}
     for c in "abcdefghijklmnopqrstuvwxyz":
-        _CHAR_MAP[c] = getattr(ecodes, f"KEY_{c.upper()}")
+        _evdev_char_map[c] = getattr(ecodes, f"KEY_{c.upper()}")
     for d in "0123456789":
-        _CHAR_MAP[d] = getattr(ecodes, f"KEY_{d}")
-    _CHAR_MAP["-"] = ecodes.KEY_MINUS
-    _CHAR_MAP["="] = ecodes.KEY_EQUAL
-    _CHAR_MAP["["] = ecodes.KEY_LEFTBRACE
-    _CHAR_MAP["]"] = ecodes.KEY_RIGHTBRACE
-    _CHAR_MAP[";"] = ecodes.KEY_SEMICOLON
-    _CHAR_MAP["'"] = ecodes.KEY_APOSTROPHE
-    _CHAR_MAP[","] = ecodes.KEY_COMMA
-    _CHAR_MAP["."] = ecodes.KEY_DOT
-    _CHAR_MAP["/"] = ecodes.KEY_SLASH
-    _CHAR_MAP["\\"] = ecodes.KEY_BACKSLASH
-    _CHAR_MAP["`"] = ecodes.KEY_GRAVE
-
-    def _resolve_token(token: str) -> list[int]:
-        """Resolve a single token to evdev key code(s)."""
-        token = token.strip().lower()
-        if token in _TOKEN_MAP:
-            return _TOKEN_MAP[token]
-        if token in _CHAR_MAP:
-            return [_CHAR_MAP[token]]
-        if token.startswith("<") and token.endswith(">"):
-            key_name = token[1:-1].upper()
-            code = getattr(ecodes, f"KEY_{key_name}", None)
-            if code is not None:
-                return [code]
-        log.warning("Unknown shortcut token: %s", token)
-        return []
-
-    if is_dt:
-        # Double-tap: inner is a single token
-        codes = _resolve_token(inner)
-        if codes:
-            cfg.double_tap_key = codes[0]
-    else:
-        # Regular combo
-        parts = inner.split("+")
-        for part in parts:
-            codes = _resolve_token(part)
-            if codes:
-                cfg.combo.add(codes[0])  # use left variant as canonical
-
-    return cfg
+        _evdev_char_map[d] = getattr(ecodes, f"KEY_{d}")
+    _evdev_char_map["-"] = ecodes.KEY_MINUS
+    _evdev_char_map["="] = ecodes.KEY_EQUAL
+    _evdev_char_map["["] = ecodes.KEY_LEFTBRACE
+    _evdev_char_map["]"] = ecodes.KEY_RIGHTBRACE
+    _evdev_char_map[";"] = ecodes.KEY_SEMICOLON
+    _evdev_char_map["'"] = ecodes.KEY_APOSTROPHE
+    _evdev_char_map["."] = ecodes.KEY_DOT
+    _evdev_char_map["/"] = ecodes.KEY_SLASH
+    _evdev_char_map["\\"] = ecodes.KEY_BACKSLASH
+    _evdev_char_map["`"] = ecodes.KEY_GRAVE
 
 
-# Modifier evdev codes (left and right variants) for normalisation
+def _resolve_evdev_token(token: str) -> int | None:
+    """Resolve a single config token to a canonical evdev key code."""
+    _build_evdev_maps()
+    assert _evdev_token_map is not None and _evdev_char_map is not None
+    token = token.strip().lower()
+    if token in _evdev_token_map:
+        return _evdev_token_map[token][0]  # left variant
+    if token in _evdev_char_map:
+        return _evdev_char_map[token]
+    if token.startswith("<") and token.endswith(">"):
+        from evdev import ecodes
+        code = getattr(ecodes, f"KEY_{token[1:-1].upper()}", None)
+        if code is not None:
+            return code
+    log.warning("Unknown shortcut token: %s", token)
+    return None
+
+
+def _parse_shortcut_evdev(shortcut_str: str) -> _ShortcutConfig:
+    """Parse a config-format shortcut string into an evdev _ShortcutConfig."""
+    if not shortcut_str:
+        return _ShortcutConfig()
+
+    shortcut_str = _normalize_shortcut_str(shortcut_str)
+
+    if "," in shortcut_str:
+        halves = shortcut_str.split(",", 1)
+        first = _resolve_evdev_token(halves[0])
+        second = _resolve_evdev_token(halves[1])
+        if first is not None and second is not None:
+            return _ShortcutConfig(seq_keys=(first, second))
+        return _ShortcutConfig()
+
+    parts = shortcut_str.split("+")
+    codes = set()
+    for part in parts:
+        code = _resolve_evdev_token(part)
+        if code is not None:
+            codes.add(code)
+    if codes:
+        return _ShortcutConfig(combo=frozenset(codes))
+    return _ShortcutConfig()
+
+
+# ── Modifier normalisation (evdev) ────────────────────────────
+
 _EVDEV_MODIFIER_PAIRS: dict[int, int] = {}
 
 
 def _init_modifier_pairs():
     global _EVDEV_MODIFIER_PAIRS
+    if _EVDEV_MODIFIER_PAIRS:
+        return
     try:
         from evdev import ecodes
         _EVDEV_MODIFIER_PAIRS = {
@@ -157,7 +205,7 @@ def _init_modifier_pairs():
         pass
 
 
-# ── Linux session detection ────────────────────────────────────
+# ── Linux session detection ───────────────────────────────────
 
 _SESSION_TYPE: Optional[str] = None
 
@@ -192,13 +240,46 @@ def _evdev_has_devices() -> bool:
     return False
 
 
-# ── Linux evdev backend ────────────────────────────────────────
+# ── Public helpers for UI warnings ────────────────────────────
+
+def needs_evdev(shortcut_str: str) -> bool:
+    """Return True if *shortcut_str* requires evdev to work.
+
+    On Wayland, pynput can only see key events that involve a modifier
+    (Ctrl, Alt, Shift, Super).  Shortcuts that are sequential combos or
+    plain-key combos without any modifier will NOT fire via pynput.
+    """
+    if not shortcut_str:
+        return False
+
+    shortcut_str = _normalize_shortcut_str(shortcut_str)
+
+    _MODIFIER_TOKENS = {
+        "<ctrl>", "<shift>", "<alt>", "<super>", "<cmd>",
+    }
+
+    # Sequential combos never work on pynput/Wayland.
+    if "," in shortcut_str:
+        return True
+
+    # Simultaneous combo — check if at least one part is a modifier.
+    parts = [p.strip().lower() for p in shortcut_str.split("+")]
+    has_modifier = any(p in _MODIFIER_TOKENS for p in parts)
+    return not has_modifier
+
+
+def is_wayland_without_evdev() -> bool:
+    """Return True if we're on Wayland and evdev can't access devices.
+
+    When True, only modifier-based simultaneous combos will work.
+    """
+    return _SYSTEM == "Linux" and _SESSION_TYPE == "wayland" and not _evdev_has_devices()
+
+
+# ── Linux evdev backend ───────────────────────────────────────
 
 class _EvdevHotkeyListener:
-    """Listen for global hotkeys using evdev (works on X11 and Wayland).
-
-    Supports regular key combos and double-tap shortcuts.
-    """
+    """Listen for global hotkeys using evdev (Linux)."""
 
     def __init__(self):
         self._toggle_cfg = _ShortcutConfig()
@@ -209,30 +290,33 @@ class _EvdevHotkeyListener:
         self.on_ptt_press: Optional[Callable[[], None]] = None
         self.on_ptt_release: Optional[Callable[[], None]] = None
 
-        self._toggle_active = False
-        self._ptt_active = False
+        # Per-shortcut sequential state (each gets its own so they
+        # don't clobber each other).
+        self._toggle_seq = _SeqState()
+        self._ptt_seq = _SeqState()
+
+        # Combo latch flags — prevent re-firing while keys are held.
+        self._toggle_combo_active = False
+        self._ptt_combo_active = False
+
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._stop_pipe_r: Optional[int] = None
         self._stop_pipe_w: Optional[int] = None
 
-        # Double-tap state: {key_code: last_press_time}
-        self._last_tap_time: dict[int, float] = {}
-
     def set_shortcuts(self, toggle_shortcut: str, ptt_shortcut: str) -> None:
         _init_modifier_pairs()
         self._toggle_cfg = _parse_shortcut_evdev(toggle_shortcut)
         self._ptt_cfg = _parse_shortcut_evdev(ptt_shortcut)
-        log.debug("Toggle config: combo=%s dt_key=%s",
-                  self._toggle_cfg.combo, self._toggle_cfg.double_tap_key)
-        log.debug("PTT config: combo=%s dt_key=%s",
-                  self._ptt_cfg.combo, self._ptt_cfg.double_tap_key)
+        self._toggle_seq.reset()
+        self._ptt_seq.reset()
+        log.debug("Toggle config: %s", self._toggle_cfg)
+        log.debug("PTT config: %s", self._ptt_cfg)
 
     def start(self) -> None:
         if self._thread is not None:
             self.stop()
-
         self._stop_event.clear()
         self._stop_pipe_r, self._stop_pipe_w = os.pipe()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -257,9 +341,13 @@ class _EvdevHotkeyListener:
         self._stop_pipe_r = None
         self._stop_pipe_w = None
         self._current_keys.clear()
-        self._last_tap_time.clear()
+        self._toggle_seq.reset()
+        self._ptt_seq.reset()
+        self._toggle_combo_active = False
+        self._ptt_combo_active = False
 
-    def _normalize_key(self, code: int) -> int:
+    @staticmethod
+    def _normalize_key(code: int) -> int:
         return _EVDEV_MODIFIER_PAIRS.get(code, code)
 
     def _run(self) -> None:
@@ -315,12 +403,13 @@ class _EvdevHotkeyListener:
 
                             code = self._normalize_key(event.code)
 
-                            if event.value == 1:  # key press
+                            if event.value == 1:  # key down
                                 self._current_keys.add(code)
-                                self._check_press(code)
-                            elif event.value == 0:  # key release
-                                self._check_release(code)
+                                self._on_key_down(code)
+                            elif event.value == 0:  # key up
+                                self._on_key_up(code)
                                 self._current_keys.discard(code)
+                            # value == 2 is auto-repeat — ignored
                     except OSError:
                         log.debug("Device %s disconnected", dev.path)
                         devices.remove(dev)
@@ -331,87 +420,92 @@ class _EvdevHotkeyListener:
                 except Exception:
                     pass
 
-    def _check_double_tap(self, cfg: _ShortcutConfig, code: int) -> bool:
-        """Check if *code* is a double-tap for *cfg*.  Returns True if fired."""
-        if not cfg.is_double_tap:
-            return False
-        if code != cfg.double_tap_key:
+    @staticmethod
+    def _check_seq(cfg: _ShortcutConfig, state: _SeqState, code: int) -> bool:
+        """Return True if *code* completes the sequential shortcut.
+
+        For double-tap (first_key == second_key): the first press arms,
+        the second press fires and resets.  Because we return True before
+        the re-arm block, a third tap does NOT re-fire.
+        """
+        if not cfg.is_sequential:
             return False
 
+        first_key, second_key = cfg.seq_keys
         now = time.monotonic()
-        last = self._last_tap_time.get(code, 0.0)
-        self._last_tap_time[code] = now
 
-        if (now - last) <= _DOUBLE_TAP_WINDOW:
-            # Reset so a third tap doesn't re-fire
-            self._last_tap_time[code] = 0.0
+        if code == second_key and state.armed and (now - state.armed_time) <= _SEQ_WINDOW:
+            state.reset()
             return True
+
+        if code == first_key:
+            state.armed = True
+            state.armed_time = now
+
         return False
 
-    def _check_press(self, code: int) -> None:
-        # Check double-tap toggle
-        if self._toggle_cfg.is_double_tap:
-            if self._check_double_tap(self._toggle_cfg, code):
-                with self._lock:
-                    if self.on_toggle:
-                        self.on_toggle()
-        # Check combo toggle
-        elif (self._toggle_cfg.combo
-              and self._toggle_cfg.combo.issubset(self._current_keys)):
-            with self._lock:
-                if not self._toggle_active:
-                    self._toggle_active = True
-                    if self.on_toggle:
-                        self.on_toggle()
+    @staticmethod
+    def _combo_matches(cfg: _ShortcutConfig, current_keys: set[int]) -> bool:
+        return cfg.is_combo and cfg.combo.issubset(current_keys)
 
-        # Check double-tap PTT
-        if self._ptt_cfg.is_double_tap:
-            if self._check_double_tap(self._ptt_cfg, code):
+    def _on_key_down(self, code: int) -> None:
+        # ── Toggle shortcut ──
+        if self._toggle_cfg.is_sequential:
+            if self._check_seq(self._toggle_cfg, self._toggle_seq, code):
                 with self._lock:
-                    if not self._ptt_active:
-                        self._ptt_active = True
+                    if self.on_toggle:
+                        self.on_toggle()
+        elif self._toggle_cfg.is_combo:
+            if self._combo_matches(self._toggle_cfg, self._current_keys):
+                if not self._toggle_combo_active:
+                    self._toggle_combo_active = True
+                    with self._lock:
+                        if self.on_toggle:
+                            self.on_toggle()
+
+        # ── PTT shortcut ──
+        if self._ptt_cfg.is_sequential:
+            if self._check_seq(self._ptt_cfg, self._ptt_seq, code):
+                with self._lock:
+                    if not self._ptt_combo_active:
+                        self._ptt_combo_active = True
                         if self.on_ptt_press:
                             self.on_ptt_press()
-        # Check combo PTT
-        elif (self._ptt_cfg.combo
-              and self._ptt_cfg.combo.issubset(self._current_keys)):
-            with self._lock:
-                if not self._ptt_active:
-                    self._ptt_active = True
-                    if self.on_ptt_press:
-                        self.on_ptt_press()
+        elif self._ptt_cfg.is_combo:
+            if self._combo_matches(self._ptt_cfg, self._current_keys):
+                if not self._ptt_combo_active:
+                    self._ptt_combo_active = True
+                    with self._lock:
+                        if self.on_ptt_press:
+                            self.on_ptt_press()
 
-    def _check_release(self, code: int) -> None:
-        # PTT release (combo mode)
-        if self._ptt_active and self._ptt_cfg.combo:
+    def _on_key_up(self, code: int) -> None:
+        # PTT release (combo)
+        if self._ptt_combo_active and self._ptt_cfg.is_combo:
             if code in self._ptt_cfg.combo:
+                self._ptt_combo_active = False
                 with self._lock:
-                    self._ptt_active = False
                     if self.on_ptt_release:
                         self.on_ptt_release()
 
-        # PTT release (double-tap mode — release the double-tapped key)
-        if self._ptt_active and self._ptt_cfg.is_double_tap:
-            if code == self._ptt_cfg.double_tap_key:
+        # PTT release (sequential — release the second key)
+        if self._ptt_combo_active and self._ptt_cfg.is_sequential:
+            if code == self._ptt_cfg.seq_keys[1]:
+                self._ptt_combo_active = False
                 with self._lock:
-                    self._ptt_active = False
                     if self.on_ptt_release:
                         self.on_ptt_release()
 
-        # Reset toggle active flag (combo mode)
-        if self._toggle_active and self._toggle_cfg.combo:
+        # Toggle combo latch reset
+        if self._toggle_combo_active and self._toggle_cfg.is_combo:
             if code in self._toggle_cfg.combo:
-                with self._lock:
-                    self._toggle_active = False
+                self._toggle_combo_active = False
 
 
-# ── pynput backend (macOS / Windows) ───────────────────────────
+# ── pynput backend (macOS / Windows / X11) ────────────────────
 
 class _PynputHotkeyListener:
-    """Listen for global hotkeys using pynput (macOS / Windows).
-
-    Supports regular key combos and double-tap shortcuts.
-    """
+    """Listen for global hotkeys using pynput."""
 
     def __init__(self):
         self._listener = None
@@ -423,22 +517,19 @@ class _PynputHotkeyListener:
         self.on_ptt_press: Optional[Callable[[], None]] = None
         self.on_ptt_release: Optional[Callable[[], None]] = None
 
-        self._toggle_active = False
-        self._ptt_active = False
+        self._toggle_seq = _SeqState()
+        self._ptt_seq = _SeqState()
+        self._toggle_combo_active = False
+        self._ptt_combo_active = False
         self._lock = threading.Lock()
 
-        # Double-tap state
-        self._last_tap_time: dict = {}  # key → monotonic time
-
     def _parse_shortcut(self, shortcut_str: str) -> _ShortcutConfig:
-        """Parse a config-format shortcut string into a pynput _ShortcutConfig."""
         from pynput import keyboard
 
-        cfg = _ShortcutConfig()
         if not shortcut_str:
-            return cfg
+            return _ShortcutConfig()
 
-        is_dt, inner = _is_double_tap_str(shortcut_str)
+        shortcut_str = _normalize_shortcut_str(shortcut_str)
 
         key_map = {
             "<ctrl>": keyboard.Key.ctrl_l,
@@ -446,38 +537,66 @@ class _PynputHotkeyListener:
             "<alt>": keyboard.Key.alt_l,
             "<cmd>": keyboard.Key.cmd,
             "<super>": keyboard.Key.cmd,
+            "<space>": keyboard.Key.space,
+            "<enter>": keyboard.Key.enter,
+            "<tab>": keyboard.Key.tab,
+            "<backspace>": keyboard.Key.backspace,
+            "<delete>": keyboard.Key.delete,
+            "<home>": keyboard.Key.home,
+            "<end>": keyboard.Key.end,
+            "<page_up>": keyboard.Key.page_up,
+            "<page_down>": keyboard.Key.page_down,
+            "<up>": keyboard.Key.up,
+            "<down>": keyboard.Key.down,
+            "<left>": keyboard.Key.left,
+            "<right>": keyboard.Key.right,
+            "<insert>": keyboard.Key.insert,
+            "<pause>": keyboard.Key.pause,
+            "<print_screen>": keyboard.Key.print_screen,
+            "<scroll_lock>": keyboard.Key.scroll_lock,
+            "<caps_lock>": keyboard.Key.caps_lock,
+            "<num_lock>": keyboard.Key.num_lock,
         }
+        for i in range(1, 13):
+            key_map[f"<f{i}>"] = getattr(keyboard.Key, f"f{i}")
 
-        def _resolve_token(token: str):
+        def _resolve(token: str):
             token = token.strip().lower()
             if token in key_map:
                 return key_map[token]
             if len(token) == 1:
                 return keyboard.KeyCode.from_char(token)
             if token.startswith("<") and token.endswith(">"):
-                key_name = token[1:-1]
                 try:
-                    return keyboard.Key[key_name]
+                    return keyboard.Key[token[1:-1]]
                 except KeyError:
                     pass
+            log.warning("Unknown shortcut token (pynput): %s", token)
             return None
 
-        if is_dt:
-            key = _resolve_token(inner)
-            if key is not None:
-                cfg.double_tap_key = key
-        else:
-            parts = inner.split("+")
-            for part in parts:
-                key = _resolve_token(part)
-                if key is not None:
-                    cfg.combo.add(key)
+        if "," in shortcut_str:
+            halves = shortcut_str.split(",", 1)
+            first = _resolve(halves[0])
+            second = _resolve(halves[1])
+            if first is not None and second is not None:
+                return _ShortcutConfig(seq_keys=(first, second))
+            return _ShortcutConfig()
 
-        return cfg
+        parts = shortcut_str.split("+")
+        keys = set()
+        for part in parts:
+            key = _resolve(part)
+            if key is not None:
+                keys.add(key)
+        if keys:
+            return _ShortcutConfig(combo=frozenset(keys))
+        return _ShortcutConfig()
 
     def set_shortcuts(self, toggle_shortcut: str, ptt_shortcut: str) -> None:
         self._toggle_cfg = self._parse_shortcut(toggle_shortcut)
         self._ptt_cfg = self._parse_shortcut(ptt_shortcut)
+        self._toggle_seq.reset()
+        self._ptt_seq.reset()
 
     def start(self) -> None:
         from pynput import keyboard
@@ -497,11 +616,13 @@ class _PynputHotkeyListener:
             self._listener.stop()
             self._listener = None
         self._current_keys.clear()
-        self._last_tap_time.clear()
+        self._toggle_seq.reset()
+        self._ptt_seq.reset()
+        self._toggle_combo_active = False
+        self._ptt_combo_active = False
 
     def _normalize_key(self, key):
         from pynput import keyboard
-
         normalization = {
             keyboard.Key.ctrl_r: keyboard.Key.ctrl_l,
             keyboard.Key.shift_r: keyboard.Key.shift_l,
@@ -510,87 +631,92 @@ class _PynputHotkeyListener:
         }
         return normalization.get(key, key)
 
-    def _check_double_tap(self, cfg: _ShortcutConfig, key) -> bool:
-        if not cfg.is_double_tap:
+    @staticmethod
+    def _check_seq(cfg: _ShortcutConfig, state: _SeqState, key) -> bool:
+        if not cfg.is_sequential:
             return False
-        if key != cfg.double_tap_key:
-            return False
-
+        first_key, second_key = cfg.seq_keys
         now = time.monotonic()
-        last = self._last_tap_time.get(key, 0.0)
-        self._last_tap_time[key] = now
 
-        if (now - last) <= _DOUBLE_TAP_WINDOW:
-            self._last_tap_time[key] = 0.0
+        if key == second_key and state.armed and (now - state.armed_time) <= _SEQ_WINDOW:
+            state.reset()
             return True
+
+        if key == first_key:
+            state.armed = True
+            state.armed_time = now
+
         return False
+
+    @staticmethod
+    def _combo_matches(cfg: _ShortcutConfig, current_keys: set) -> bool:
+        return cfg.is_combo and cfg.combo.issubset(current_keys)
 
     def _on_press(self, key) -> None:
         normalized = self._normalize_key(key)
         self._current_keys.add(normalized)
 
         # Toggle
-        if self._toggle_cfg.is_double_tap:
-            if self._check_double_tap(self._toggle_cfg, normalized):
+        if self._toggle_cfg.is_sequential:
+            if self._check_seq(self._toggle_cfg, self._toggle_seq, normalized):
                 with self._lock:
                     if self.on_toggle:
                         self.on_toggle()
-        elif (self._toggle_cfg.combo
-              and self._toggle_cfg.combo.issubset(self._current_keys)):
-            with self._lock:
-                if not self._toggle_active:
-                    self._toggle_active = True
-                    if self.on_toggle:
-                        self.on_toggle()
+        elif self._toggle_cfg.is_combo:
+            if self._combo_matches(self._toggle_cfg, self._current_keys):
+                if not self._toggle_combo_active:
+                    self._toggle_combo_active = True
+                    with self._lock:
+                        if self.on_toggle:
+                            self.on_toggle()
 
         # PTT
-        if self._ptt_cfg.is_double_tap:
-            if self._check_double_tap(self._ptt_cfg, normalized):
+        if self._ptt_cfg.is_sequential:
+            if self._check_seq(self._ptt_cfg, self._ptt_seq, normalized):
                 with self._lock:
-                    if not self._ptt_active:
-                        self._ptt_active = True
+                    if not self._ptt_combo_active:
+                        self._ptt_combo_active = True
                         if self.on_ptt_press:
                             self.on_ptt_press()
-        elif (self._ptt_cfg.combo
-              and self._ptt_cfg.combo.issubset(self._current_keys)):
-            with self._lock:
-                if not self._ptt_active:
-                    self._ptt_active = True
-                    if self.on_ptt_press:
-                        self.on_ptt_press()
+        elif self._ptt_cfg.is_combo:
+            if self._combo_matches(self._ptt_cfg, self._current_keys):
+                if not self._ptt_combo_active:
+                    self._ptt_combo_active = True
+                    with self._lock:
+                        if self.on_ptt_press:
+                            self.on_ptt_press()
 
     def _on_release(self, key) -> None:
         normalized = self._normalize_key(key)
 
         # PTT release (combo)
-        if self._ptt_active and self._ptt_cfg.combo:
+        if self._ptt_combo_active and self._ptt_cfg.is_combo:
             if normalized in self._ptt_cfg.combo:
+                self._ptt_combo_active = False
                 with self._lock:
-                    self._ptt_active = False
                     if self.on_ptt_release:
                         self.on_ptt_release()
 
-        # PTT release (double-tap)
-        if self._ptt_active and self._ptt_cfg.is_double_tap:
-            if normalized == self._ptt_cfg.double_tap_key:
+        # PTT release (sequential)
+        if self._ptt_combo_active and self._ptt_cfg.is_sequential:
+            if normalized == self._ptt_cfg.seq_keys[1]:
+                self._ptt_combo_active = False
                 with self._lock:
-                    self._ptt_active = False
                     if self.on_ptt_release:
                         self.on_ptt_release()
 
-        # Reset toggle active (combo)
-        if self._toggle_active and self._toggle_cfg.combo:
+        # Toggle combo latch reset
+        if self._toggle_combo_active and self._toggle_cfg.is_combo:
             if normalized in self._toggle_cfg.combo:
-                with self._lock:
-                    self._toggle_active = False
+                self._toggle_combo_active = False
 
         self._current_keys.discard(normalized)
 
 
-# ── Public facade ──────────────────────────────────────────────
+# ── Public facade ─────────────────────────────────────────────
 
 class HotkeyManager:
-    """Manages global hotkeys — auto-selects the best backend for the platform."""
+    """Manages global hotkeys — auto-selects the best backend."""
 
     def __init__(self):
         if _SYSTEM == "Linux":
@@ -601,14 +727,12 @@ class HotkeyManager:
                 self._backend = _PynputHotkeyListener()
                 if _SESSION_TYPE == "wayland":
                     log.warning(
-                        "Cannot access /dev/input (evdev) — falling back to pynput. "
-                        "Global hotkeys may not work under Wayland without input group access. "
-                        "Fix: sudo usermod -aG input $USER  (then re-login)"
+                        "evdev unavailable — using pynput on Wayland. "
+                        "Only modifier-based combos (Ctrl+X, Alt+V, etc.) will work. "
+                        "For full support: sudo usermod -aG input $USER  (then re-login)"
                     )
                 else:
-                    log.info(
-                        "Using pynput backend for global hotkeys (evdev unavailable)"
-                    )
+                    log.info("Using pynput backend (X11)")
         else:
             self._backend = _PynputHotkeyListener()
             log.info("Using pynput backend for global hotkeys")
