@@ -13,11 +13,18 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux
           - os: ubuntu-22.04
-            artifact: VoiceBoard-Linux
+            artifact: VoiceBoard-Linux-x86_64
+          - os: ubuntu-22.04-arm
+            artifact: VoiceBoard-Linux-ARM64
+          # Windows
           - os: windows-latest
-            artifact: VoiceBoard-Windows
-          - os: macos-13
+            artifact: VoiceBoard-Windows-x86_64
+          - os: windows-11-arm
+            artifact: VoiceBoard-Windows-ARM64
+          # macOS
+          - os: macos-15-intel
             artifact: VoiceBoard-macOS-Intel
           - os: macos-latest
             artifact: VoiceBoard-macOS-AppleSilicon
