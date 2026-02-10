@@ -55,6 +55,11 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller voiceboard.spec
 
+      # macOS: ad-hoc codesign so the unsigned binary doesn't crash with SIGILL
+      - name: Codesign binary (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --deep --sign - dist/VoiceBoard
+
       # Windows: rename to .exe
       - name: Rename artifact (Windows)
         if: runner.os == 'Windows'
