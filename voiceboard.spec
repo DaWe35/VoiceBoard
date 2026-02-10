@@ -22,31 +22,34 @@ _portaudio_binaries = []
 _portaudio_datas = []
 
 if sys.platform.startswith('linux'):
-    _pa = find_library('portaudio')
-    if _pa:
-        import ctypes.util, os, subprocess
-        # find_library returns e.g. 'libportaudio.so.2'; resolve full path
-        try:
-            _pa_path = subprocess.check_output(
-                ['ldconfig', '-p'], text=True,
-            )
-            for _line in _pa_path.splitlines():
-                if _pa in _line and '=>' in _line:
-                    _resolved = _line.split('=>')[-1].strip()
-                    _portaudio_binaries.append((_resolved, '.'))
-                    break
-        except Exception:
-            pass
-        if not _portaudio_binaries:
-            # Fallback: common paths
-            for _candidate in (
-                f'/usr/lib/{_pa}',
-                f'/usr/lib/x86_64-linux-gnu/{_pa}',
-                f'/usr/lib/aarch64-linux-gnu/{_pa}',
-            ):
-                if os.path.isfile(_candidate):
-                    _portaudio_binaries.append((_candidate, '.'))
-                    break
+    import os
+    import subprocess
+    import glob
+    
+    # Try to find libportaudio.so via ldconfig (most reliable)
+    _pa_path = None
+    try:
+        _ldconfig_out = subprocess.check_output(['ldconfig', '-p'], text=True, stderr=subprocess.DEVNULL)
+        for _line in _ldconfig_out.splitlines():
+            if 'libportaudio.so' in _line and '=>' in _line:
+                _pa_path = _line.split('=>')[-1].strip()
+                break
+    except Exception:
+        pass
+    
+    # Fallback: search common library paths
+    if not _pa_path:
+        for _libdir in ('/usr/lib', '/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/lib', '/lib/x86_64-linux-gnu'):
+            _matches = glob.glob(os.path.join(_libdir, 'libportaudio.so*'))
+            if _matches:
+                # Prefer .so.2 over .so (the actual library, not symlink)
+                _pa_path = sorted(_matches, key=lambda x: ('.so.' in x, x))[-1]
+                break
+    
+    if _pa_path and os.path.isfile(_pa_path):
+        # Resolve symlinks to get the actual library file
+        _real_path = os.path.realpath(_pa_path)
+        _portaudio_binaries.append((_real_path, '.'))
 else:
     # Windows & macOS: _sounddevice_data ships the PortAudio binary
     try:
