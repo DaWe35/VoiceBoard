@@ -941,11 +941,10 @@ class SettingsPage(QWidget):
 
         if shortcut_str and needs_evdev(shortcut_str) and is_wayland_without_evdev():
             label.setText(
-                "<b>⚠ This shortcut won't work</b> on your current setup "
-                "(Wayland without <code>evdev</code> access).<br>"
-                "Use a modifier-based combo (e.g. <b>Ctrl+Shift+V</b>) "
+                "<b>⚠ This shortcut likely won't work.</b><br>"
+                "Because you're on Wayland, you can either use a modifier-based combo (e.g. <b>Ctrl+Shift+V</b>) "
                 "or grant evdev access: "
-                "<code>sudo usermod -aG input $USER</code> then re-login."
+                "<i>sudo usermod -aG input $USER</i> then re-login."
             )
             label.show()
         else:
