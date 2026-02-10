@@ -22,10 +22,13 @@ _LOCK_FILE = _config_dir() / "voiceboard.pid"
 
 
 def _check_macos_accessibility() -> bool:
-    """Check macOS Accessibility permission, prompting the user if missing.
+    """Check macOS Accessibility permission.
 
-    Calls AXIsProcessTrustedWithOptions with the prompt flag so macOS
-    automatically shows a system dialog asking the user to grant access.
+    Uses the simple AXIsProcessTrusted() call (no arguments) to avoid
+    building CoreFoundation objects via ctypes — the complex
+    AXIsProcessTrustedWithOptions approach can segfault in bundled
+    (PyInstaller) apps on certain macOS versions.
+
     On non-macOS platforms this always returns True.
     """
     if platform.system() != "Darwin":
@@ -34,55 +37,31 @@ def _check_macos_accessibility() -> bool:
         import ctypes
         import ctypes.util
 
-        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
-        CoreFoundation = ctypes.cdll.LoadLibrary(
-            ctypes.util.find_library("CoreFoundation")
-        )
-        AppServices = ctypes.cdll.LoadLibrary(
-            "/System/Library/Frameworks/ApplicationServices.framework"
-            "/ApplicationServices"
-        )
+        # Locate ApplicationServices via find_library (respects dyld
+        # shared cache on macOS 11+) with a hard-coded fallback.
+        path = ctypes.util.find_library("ApplicationServices")
+        if not path:
+            path = (
+                "/System/Library/Frameworks/ApplicationServices.framework"
+                "/ApplicationServices"
+            )
+        lib = ctypes.cdll.LoadLibrary(path)
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        trusted = bool(lib.AXIsProcessTrusted())
 
-        # Set up objc runtime calls
-        objc.objc_getClass.restype = ctypes.c_void_p
-        objc.sel_registerName.restype = ctypes.c_void_p
-        objc.objc_msgSend.restype = ctypes.c_void_p
-        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        # If not trusted, nudge the user by opening the right System
+        # Settings pane (replaces the old AXIsProcessTrustedWithOptions
+        # prompt-flag approach).
+        if not trusted:
+            import subprocess
+            subprocess.Popen(
+                ["open", "x-apple.systempreferences:"
+                 "com.apple.preference.security?Privacy_Accessibility"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
-        # Create the CFString key "AXTrustedCheckOptionPrompt"
-        CoreFoundation.CFStringCreateWithCString.restype = ctypes.c_void_p
-        CoreFoundation.CFStringCreateWithCString.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32,
-        ]
-        prompt_key = CoreFoundation.CFStringCreateWithCString(
-            None, b"AXTrustedCheckOptionPrompt", 0,
-        )
-
-        # kCFBooleanTrue
-        kCFBooleanTrue = ctypes.c_void_p.in_dll(CoreFoundation, "kCFBooleanTrue")
-
-        # Build a CFDictionary: {kAXTrustedCheckOptionPrompt: true}
-        CoreFoundation.CFDictionaryCreate.restype = ctypes.c_void_p
-        CoreFoundation.CFDictionaryCreate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_long,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        keys = (ctypes.c_void_p * 1)(prompt_key)
-        values = (ctypes.c_void_p * 1)(kCFBooleanTrue)
-        options = CoreFoundation.CFDictionaryCreate(
-            None, keys, values, 1,
-            ctypes.c_void_p.in_dll(CoreFoundation, "kCFTypeDictionaryKeyCallBacks"),
-            ctypes.c_void_p.in_dll(CoreFoundation, "kCFTypeDictionaryValueCallBacks"),
-        )
-
-        # AXIsProcessTrustedWithOptions — shows the native macOS prompt
-        AppServices.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-        AppServices.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-        return bool(AppServices.AXIsProcessTrustedWithOptions(options))
+        return trusted
     except Exception:
         return True  # can't check — assume OK
 
@@ -186,27 +165,43 @@ class VoiceBoardApp:
         self.hotkeys = HotkeyManager()
         self._recording = False
 
+    @staticmethod
+    def _diag(msg: str) -> None:
+        """Write a diagnostic line to stderr (survives crashes)."""
+        try:
+            sys.stderr.write(f"[VoiceBoard] {msg}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
     def run(self) -> int:
         """Run the application."""
+        self._diag("startup: begin")
+
         # Ensure only one instance runs at a time
         _kill_existing_instance()
         _write_pid_file()
         atexit.register(_remove_pid_file)
 
+        self._diag("startup: creating QApplication")
         self.qt_app = QApplication(sys.argv)
         self.qt_app.setApplicationName("VoiceBoard")
         self.qt_app.setQuitOnLastWindowClosed(False)
+        self._diag("startup: applying stylesheet")
         self.qt_app.setStyleSheet(STYLESHEET)
 
         # Create main window
+        self._diag("startup: creating main window")
         self.window = MainWindow()
         self.window.load_config(self.config)
 
         # Populate microphone list
+        self._diag("startup: scanning microphones")
         self._refresh_mic_list()
         self.window.mic_refresh_btn.clicked.connect(self._refresh_mic_list)
 
         # Create system tray
+        self._diag("startup: creating system tray")
         self.tray = create_tray_icon(self.qt_app, self.window)
 
         # Connect UI signals
@@ -246,6 +241,7 @@ class VoiceBoardApp:
 
         # On macOS, check accessibility BEFORE starting pynput — pynput's
         # CGEventTap will segfault if the process is not trusted.
+        self._diag("startup: checking accessibility")
         self._macos_accessible = True
         if not _check_macos_accessibility():
             self._macos_accessible = False
@@ -256,6 +252,7 @@ class VoiceBoardApp:
             )
 
         # Setup hotkeys (skipped on macOS when untrusted — retried by timer)
+        self._diag("startup: setting up hotkeys")
         if self._macos_accessible:
             self._setup_hotkeys()
         elif platform.system() == "Darwin":
@@ -276,6 +273,7 @@ class VoiceBoardApp:
         else:
             self.window.show()
 
+        self._diag("startup: complete — entering event loop")
         return self.qt_app.exec()
 
     def _start_mic_preview(self) -> None:
@@ -323,7 +321,10 @@ class VoiceBoardApp:
 
     def _refresh_mic_list(self) -> None:
         """Re-scan audio input devices and update the UI dropdown."""
-        devices = list_input_devices()
+        try:
+            devices = list_input_devices()
+        except Exception:
+            devices = []
         self.window.populate_mic_list(devices, self.config.input_device)
 
     def _setup_hotkeys(self) -> None:

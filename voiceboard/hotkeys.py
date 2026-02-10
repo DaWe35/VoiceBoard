@@ -619,12 +619,15 @@ class _PynputHotkeyListener:
         if _SYSTEM == "Darwin":
             try:
                 import ctypes, ctypes.util
-                app_svc = ctypes.cdll.LoadLibrary(
-                    "/System/Library/Frameworks/ApplicationServices.framework"
-                    "/ApplicationServices"
-                )
-                app_svc.AXIsProcessTrusted.restype = ctypes.c_bool
-                if not app_svc.AXIsProcessTrusted():
+                path = ctypes.util.find_library("ApplicationServices")
+                if not path:
+                    path = (
+                        "/System/Library/Frameworks"
+                        "/ApplicationServices.framework/ApplicationServices"
+                    )
+                lib = ctypes.cdll.LoadLibrary(path)
+                lib.AXIsProcessTrusted.restype = ctypes.c_bool
+                if not lib.AXIsProcessTrusted():
                     log.warning(
                         "Process is not trusted for Accessibility — "
                         "skipping pynput listener to avoid segfault"
