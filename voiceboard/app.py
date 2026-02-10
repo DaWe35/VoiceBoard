@@ -43,6 +43,15 @@ def _kill_existing_instance() -> None:
     except PermissionError:
         # Process exists but we can't query it (different user) — try to kill anyway
         pass
+    except OSError as e:
+        # On Windows, os.kill(pid, 0) can raise OSError with winerror 6 (invalid handle)
+        # if the process doesn't exist or the handle is invalid
+        if sys.platform == "win32" and getattr(e, 'winerror', None) == 6:
+            # Invalid handle — process likely doesn't exist, treat as stale lock file
+            _LOCK_FILE.unlink(missing_ok=True)
+            return
+        # For other OSErrors, re-raise
+        raise
 
     # Terminate the old instance
     try:
@@ -63,6 +72,12 @@ def _kill_existing_instance() -> None:
             break  # it's gone
         except PermissionError:
             break
+        except OSError as e:
+            # On Windows, os.kill(pid, 0) can raise OSError with winerror 6 (invalid handle)
+            if sys.platform == "win32" and getattr(e, 'winerror', None) == 6:
+                break  # process is gone
+            # For other OSErrors, continue waiting
+            pass
     else:
         # Still alive — force kill
         try:
