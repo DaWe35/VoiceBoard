@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QTextEdit,
+    QScrollArea,
+    QFrame,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QObject, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence
@@ -719,9 +721,46 @@ class SettingsPage(QWidget):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.verticalScrollBar().setStyleSheet("""
+            QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                margin: 4px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #3d3d5a;
+                border-radius: 3px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #6C63FF;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #5A52E0;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """)
+        page_layout.addWidget(scroll)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setSpacing(16)
         layout.setContentsMargins(24, 24, 24, 24)
+        scroll.setWidget(content)
 
         # ── Header with back button ──
         header_row = QHBoxLayout()
