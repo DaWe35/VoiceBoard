@@ -531,34 +531,43 @@ class _PynputHotkeyListener:
 
         shortcut_str = _normalize_shortcut_str(shortcut_str)
 
+        def _key_attr(name: str):
+            # Some Key attributes are backend/platform dependent (e.g. macOS
+            # may not expose Key.insert). Resolve defensively so startup never
+            # crashes while parsing shortcuts.
+            return getattr(keyboard.Key, name, None)
+
         key_map = {
-            "<ctrl>": keyboard.Key.ctrl_l,
-            "<shift>": keyboard.Key.shift_l,
-            "<alt>": keyboard.Key.alt_l,
-            "<cmd>": keyboard.Key.cmd,
-            "<super>": keyboard.Key.cmd,
-            "<space>": keyboard.Key.space,
-            "<enter>": keyboard.Key.enter,
-            "<tab>": keyboard.Key.tab,
-            "<backspace>": keyboard.Key.backspace,
-            "<delete>": keyboard.Key.delete,
-            "<home>": keyboard.Key.home,
-            "<end>": keyboard.Key.end,
-            "<page_up>": keyboard.Key.page_up,
-            "<page_down>": keyboard.Key.page_down,
-            "<up>": keyboard.Key.up,
-            "<down>": keyboard.Key.down,
-            "<left>": keyboard.Key.left,
-            "<right>": keyboard.Key.right,
-            "<insert>": keyboard.Key.insert,
-            "<pause>": keyboard.Key.pause,
-            "<print_screen>": keyboard.Key.print_screen,
-            "<scroll_lock>": keyboard.Key.scroll_lock,
-            "<caps_lock>": keyboard.Key.caps_lock,
-            "<num_lock>": keyboard.Key.num_lock,
+            "<ctrl>": _key_attr("ctrl_l"),
+            "<shift>": _key_attr("shift_l"),
+            "<alt>": _key_attr("alt_l"),
+            "<cmd>": _key_attr("cmd"),
+            "<super>": _key_attr("cmd"),
+            "<space>": _key_attr("space"),
+            "<enter>": _key_attr("enter"),
+            "<tab>": _key_attr("tab"),
+            "<backspace>": _key_attr("backspace"),
+            "<delete>": _key_attr("delete"),
+            "<home>": _key_attr("home"),
+            "<end>": _key_attr("end"),
+            "<page_up>": _key_attr("page_up"),
+            "<page_down>": _key_attr("page_down"),
+            "<up>": _key_attr("up"),
+            "<down>": _key_attr("down"),
+            "<left>": _key_attr("left"),
+            "<right>": _key_attr("right"),
+            "<insert>": _key_attr("insert"),
+            "<pause>": _key_attr("pause"),
+            "<print_screen>": _key_attr("print_screen"),
+            "<scroll_lock>": _key_attr("scroll_lock"),
+            "<caps_lock>": _key_attr("caps_lock"),
+            "<num_lock>": _key_attr("num_lock"),
         }
         for i in range(1, 13):
-            key_map[f"<f{i}>"] = getattr(keyboard.Key, f"f{i}")
+            key_map[f"<f{i}>"] = _key_attr(f"f{i}")
+
+        # Remove tokens unavailable on the active platform/backend.
+        key_map = {token: key for token, key in key_map.items() if key is not None}
 
         def _resolve(token: str):
             token = token.strip().lower()
@@ -623,12 +632,23 @@ class _PynputHotkeyListener:
 
     def _normalize_key(self, key):
         from pynput import keyboard
-        normalization = {
-            keyboard.Key.ctrl_r: keyboard.Key.ctrl_l,
-            keyboard.Key.shift_r: keyboard.Key.shift_l,
-            keyboard.Key.alt_r: keyboard.Key.alt_l,
-            keyboard.Key.alt_gr: keyboard.Key.alt_l,
-        }
+        normalization = {}
+        ctrl_r = getattr(keyboard.Key, "ctrl_r", None)
+        ctrl_l = getattr(keyboard.Key, "ctrl_l", None)
+        shift_r = getattr(keyboard.Key, "shift_r", None)
+        shift_l = getattr(keyboard.Key, "shift_l", None)
+        alt_r = getattr(keyboard.Key, "alt_r", None)
+        alt_gr = getattr(keyboard.Key, "alt_gr", None)
+        alt_l = getattr(keyboard.Key, "alt_l", None)
+
+        if ctrl_r is not None and ctrl_l is not None:
+            normalization[ctrl_r] = ctrl_l
+        if shift_r is not None and shift_l is not None:
+            normalization[shift_r] = shift_l
+        if alt_r is not None and alt_l is not None:
+            normalization[alt_r] = alt_l
+        if alt_gr is not None and alt_l is not None:
+            normalization[alt_gr] = alt_l
         return normalization.get(key, key)
 
     @staticmethod
