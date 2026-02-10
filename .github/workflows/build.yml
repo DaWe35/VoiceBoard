@@ -17,8 +17,10 @@ jobs:
             artifact: VoiceBoard-Linux
           - os: windows-latest
             artifact: VoiceBoard-Windows
+          - os: macos-13
+            artifact: VoiceBoard-macOS-Intel
           - os: macos-latest
-            artifact: VoiceBoard-macOS
+            artifact: VoiceBoard-macOS-AppleSilicon
 
     runs-on: ${{ matrix.os }}
 
