@@ -9,7 +9,6 @@ Features:
 - Works well with any languages (not like Whisper)
 - Shortcuts for toggle and push-to-talk mode
 
-
 ## Development Setup
 
 ```bash
