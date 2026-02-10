@@ -3,6 +3,7 @@
 
 import sys
 import certifi
+from ctypes.util import find_library
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
@@ -10,13 +11,56 @@ block_cipher = None
 # Bundle SSL certificate authority bundle so HTTPS/WSS connections work
 _certifi_pem = certifi.where()
 
+# ---------------------------------------------------------------------------
+# Bundle PortAudio so users don't need it installed separately.
+#
+# Linux:   find the system libportaudio via ctypes and ship it.
+# Win/Mac: the `_sounddevice_data` pip package ships pre-built binaries;
+#          collect_data_files pulls them in automatically.
+# ---------------------------------------------------------------------------
+_portaudio_binaries = []
+_portaudio_datas = []
+
+if sys.platform.startswith('linux'):
+    _pa = find_library('portaudio')
+    if _pa:
+        import ctypes.util, os, subprocess
+        # find_library returns e.g. 'libportaudio.so.2'; resolve full path
+        try:
+            _pa_path = subprocess.check_output(
+                ['ldconfig', '-p'], text=True,
+            )
+            for _line in _pa_path.splitlines():
+                if _pa in _line and '=>' in _line:
+                    _resolved = _line.split('=>')[-1].strip()
+                    _portaudio_binaries.append((_resolved, '.'))
+                    break
+        except Exception:
+            pass
+        if not _portaudio_binaries:
+            # Fallback: common paths
+            for _candidate in (
+                f'/usr/lib/{_pa}',
+                f'/usr/lib/x86_64-linux-gnu/{_pa}',
+                f'/usr/lib/aarch64-linux-gnu/{_pa}',
+            ):
+                if os.path.isfile(_candidate):
+                    _portaudio_binaries.append((_candidate, '.'))
+                    break
+else:
+    # Windows & macOS: _sounddevice_data ships the PortAudio binary
+    try:
+        _portaudio_datas = collect_data_files('_sounddevice_data')
+    except Exception:
+        pass
+
 a = Analysis(
     ['voiceboard/__main__.py'],
     pathex=[],
-    binaries=[],
+    binaries=_portaudio_binaries,
     datas=[
         (_certifi_pem, 'certifi'),
-    ] + collect_data_files('certifi'),
+    ] + collect_data_files('certifi') + _portaudio_datas,
     hiddenimports=[
         'PySide6.QtSvg',
         'certifi',
