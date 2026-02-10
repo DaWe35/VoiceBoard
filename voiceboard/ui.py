@@ -787,8 +787,8 @@ class SettingsPage(QWidget):
         self.language_input.lineEdit().setPlaceholderText("Auto-detect")
         options_layout.addRow("Language:", self.language_input)
 
-        self.start_minimized_cb = QCheckBox("Start minimized to tray")
-        options_layout.addRow(self.start_minimized_cb)
+        self.auto_start_cb = QCheckBox("Launch on system startup")
+        options_layout.addRow(self.auto_start_cb)
 
         options_group.setLayout(options_layout)
         layout.addWidget(options_group)
@@ -831,7 +831,7 @@ class SettingsPage(QWidget):
         self.toggle_input.set_shortcut_string(config.toggle_shortcut)
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
         self.language_input.setCurrentText(config.language)
-        self.start_minimized_cb.setChecked(config.start_minimized)
+        self.auto_start_cb.setChecked(config.auto_start)
 
     def save_to_config(self, config) -> None:
         """Write settings field values back to config object."""
@@ -839,7 +839,7 @@ class SettingsPage(QWidget):
         config.toggle_shortcut = self.toggle_input.shortcut_string()
         config.ptt_shortcut = self.ptt_input.shortcut_string()
         config.language = self.language_input.currentText().strip()
-        config.start_minimized = self.start_minimized_cb.isChecked()
+        config.auto_start = self.auto_start_cb.isChecked()
         config.input_device = self.selected_device_index()
 
 
@@ -998,7 +998,7 @@ class MainWindow(QMainWindow):
         self.toggle_input = self.settings_page.toggle_input
         self.ptt_input = self.settings_page.ptt_input
         self.language_input = self.settings_page.language_input
-        self.start_minimized_cb = self.settings_page.start_minimized_cb
+        self.auto_start_cb = self.settings_page.auto_start_cb
         self.mic_combo = self.settings_page.mic_combo
         self.mic_refresh_btn = self.settings_page.mic_refresh_btn
         self.audio_level = self.settings_page.audio_level

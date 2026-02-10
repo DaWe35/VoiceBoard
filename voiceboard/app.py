@@ -15,6 +15,7 @@ from voiceboard.typer import enqueue_text, ensure_ready as ensure_typer_ready
 from voiceboard.hotkeys import HotkeyManager
 from voiceboard.ui import MainWindow, create_tray_icon, svg_to_icon, STYLESHEET
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
+from voiceboard.autostart import set_autostart
 
 _LOCK_FILE = _config_dir() / "voiceboard.pid"
 
@@ -155,7 +156,7 @@ class VoiceBoardApp:
         self.window.toggle_input.shortcut_changed.connect(self._schedule_save)
         self.window.ptt_input.shortcut_changed.connect(self._schedule_save)
         self.window.language_input.currentTextChanged.connect(self._schedule_save)
-        self.window.start_minimized_cb.stateChanged.connect(self._schedule_save)
+        self.window.auto_start_cb.stateChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._on_mic_changed)
 
@@ -183,8 +184,8 @@ class VoiceBoardApp:
         self.window.settings_page.opened.connect(self._on_settings_opened)
         self.window.settings_page.closed.connect(self._on_settings_closed)
 
-        # Show or minimize
-        if self.config.start_minimized:
+        # Show or minimize — start hidden when launched by OS autostart
+        if "--autostart" in sys.argv:
             self.window.hide()
         else:
             self.window.show()
@@ -352,6 +353,9 @@ class VoiceBoardApp:
         # Update transcriber with new settings
         self.transcriber.update_api_key(self.config.soniox_api_key)
         self.transcriber.update_language(self.config.language)
+
+        # Sync OS auto-start with the config setting
+        set_autostart(self.config.auto_start)
 
         # Restart hotkeys with new shortcuts
         self.hotkeys.stop()

@@ -30,7 +30,6 @@ class AppConfig:
     ptt_shortcut: str = "<f8>"
     language: str = ""
     input_device: str = ""  # empty = system default
-    start_minimized: bool = False
     auto_start: bool = False
 
     def save(self) -> None:
