@@ -885,6 +885,26 @@ class MainWindow(QMainWindow):
         subtitle.setStyleSheet("color: #7070a0; font-size: 12px; margin-bottom: 8px;")
         layout.addWidget(subtitle)
 
+        # ── Warning banner (hidden by default) ──
+        self.warning_banner = QLabel()
+        self.warning_banner.setWordWrap(True)
+        self.warning_banner.setOpenExternalLinks(False)
+        self.warning_banner.setTextFormat(Qt.RichText)
+        self.warning_banner.setAlignment(Qt.AlignCenter)
+        self.warning_banner.setStyleSheet(
+            "QLabel {"
+            "  background-color: #3a2a10;"
+            "  color: #FFD580;"
+            "  border: 1px solid #665520;"
+            "  border-radius: 8px;"
+            "  padding: 10px 14px;"
+            "  font-size: 12px;"
+            "}"
+            "QLabel a { color: #FFB347; text-decoration: underline; }"
+        )
+        self.warning_banner.hide()
+        layout.addWidget(self.warning_banner)
+
         # ── Record Button ──
         btn_container = QHBoxLayout()
         btn_container.setAlignment(Qt.AlignCenter)
@@ -1022,6 +1042,15 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
+
+    def show_warning(self, html: str) -> None:
+        """Show a warning banner on the main page with the given rich-text."""
+        self.warning_banner.setText(html)
+        self.warning_banner.show()
+
+    def hide_warning(self) -> None:
+        """Hide the warning banner."""
+        self.warning_banner.hide()
 
     def set_recording_state(self, recording: bool) -> None:
         """Update UI to reflect recording state."""

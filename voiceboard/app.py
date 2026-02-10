@@ -2,6 +2,7 @@
 
 import atexit
 import os
+import platform
 import signal
 import sys
 
@@ -18,6 +19,24 @@ from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
 from voiceboard.autostart import set_autostart
 
 _LOCK_FILE = _config_dir() / "voiceboard.pid"
+
+
+def _check_macos_accessibility() -> bool:
+    """Return True if the process has macOS Accessibility permission.
+
+    On non-macOS platforms this always returns True.
+    """
+    if platform.system() != "Darwin":
+        return True
+    try:
+        import ctypes
+        lib = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework"
+            "/ApplicationServices"
+        )
+        return bool(lib.AXIsProcessTrusted())
+    except Exception:
+        return True  # can't check — assume OK
 
 
 def _kill_existing_instance() -> None:
@@ -179,6 +198,14 @@ class VoiceBoardApp:
 
         # Setup hotkeys
         self._setup_hotkeys()
+
+        # Warn about missing Accessibility permission on macOS
+        if not _check_macos_accessibility():
+            self.window.show_warning(
+                "⚠️ <b>Accessibility permission required</b><br>"
+                "Global hotkeys won't work until VoiceBoard is allowed in "
+                "<b>System Settings → Privacy &amp; Security → Accessibility</b>."
+            )
 
         # Start/stop microphone preview when settings page opens/closes
         self.window.settings_page.opened.connect(self._on_settings_opened)
