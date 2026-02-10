@@ -22,19 +22,67 @@ _LOCK_FILE = _config_dir() / "voiceboard.pid"
 
 
 def _check_macos_accessibility() -> bool:
-    """Return True if the process has macOS Accessibility permission.
+    """Check macOS Accessibility permission, prompting the user if missing.
 
+    Calls AXIsProcessTrustedWithOptions with the prompt flag so macOS
+    automatically shows a system dialog asking the user to grant access.
     On non-macOS platforms this always returns True.
     """
     if platform.system() != "Darwin":
         return True
     try:
         import ctypes
-        lib = ctypes.cdll.LoadLibrary(
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        CoreFoundation = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library("CoreFoundation")
+        )
+        AppServices = ctypes.cdll.LoadLibrary(
             "/System/Library/Frameworks/ApplicationServices.framework"
             "/ApplicationServices"
         )
-        return bool(lib.AXIsProcessTrusted())
+
+        # Set up objc runtime calls
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+        # Create the CFString key "AXTrustedCheckOptionPrompt"
+        CoreFoundation.CFStringCreateWithCString.restype = ctypes.c_void_p
+        CoreFoundation.CFStringCreateWithCString.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32,
+        ]
+        prompt_key = CoreFoundation.CFStringCreateWithCString(
+            None, b"AXTrustedCheckOptionPrompt", 0,
+        )
+
+        # kCFBooleanTrue
+        kCFBooleanTrue = ctypes.c_void_p.in_dll(CoreFoundation, "kCFBooleanTrue")
+
+        # Build a CFDictionary: {kAXTrustedCheckOptionPrompt: true}
+        CoreFoundation.CFDictionaryCreate.restype = ctypes.c_void_p
+        CoreFoundation.CFDictionaryCreate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        keys = (ctypes.c_void_p * 1)(prompt_key)
+        values = (ctypes.c_void_p * 1)(kCFBooleanTrue)
+        options = CoreFoundation.CFDictionaryCreate(
+            None, keys, values, 1,
+            ctypes.c_void_p.in_dll(CoreFoundation, "kCFTypeDictionaryKeyCallBacks"),
+            ctypes.c_void_p.in_dll(CoreFoundation, "kCFTypeDictionaryValueCallBacks"),
+        )
+
+        # AXIsProcessTrustedWithOptions — shows the native macOS prompt
+        AppServices.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        AppServices.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+        return bool(AppServices.AXIsProcessTrustedWithOptions(options))
     except Exception:
         return True  # can't check — assume OK
 
