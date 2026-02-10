@@ -184,7 +184,6 @@ class VoiceBoardApp:
             language=self.config.language,
         )
         self.hotkeys = HotkeyManager()
-        self._hotkeys_started = False
         self._recording = False
 
     def run(self) -> int:
@@ -245,12 +244,11 @@ class VoiceBoardApp:
         self.transcriber.on_text = lambda text, bs: self.window.signals.transcription_text.emit(text, bs)
         self.transcriber.on_error = lambda err: self.window.signals.transcription_error.emit(err)
 
-        # On macOS, check Accessibility before starting global listeners.
-        # Starting pynput listeners before trust is granted can crash.
-        can_start_hotkeys = _check_macos_accessibility()
-        if can_start_hotkeys:
-            self._setup_hotkeys()
-        else:
+        # Setup hotkeys
+        self._setup_hotkeys()
+
+        # Warn about missing Accessibility permission on macOS
+        if not _check_macos_accessibility():
             self.window.show_warning(
                 "⚠️ <b>Accessibility permission required</b><br>"
                 "Global hotkeys won't work until VoiceBoard is allowed in "
@@ -316,7 +314,6 @@ class VoiceBoardApp:
         self.hotkeys.on_ptt_press = lambda: self.window.signals.ptt_press_signal.emit()
         self.hotkeys.on_ptt_release = lambda: self.window.signals.ptt_release_signal.emit()
         self.hotkeys.start()
-        self._hotkeys_started = True
 
     def _on_record_button(self) -> None:
         """Handle the big record/stop button click."""
@@ -435,7 +432,6 @@ class VoiceBoardApp:
         # Sync OS auto-start with the config setting
         set_autostart(self.config.auto_start)
 
-        # Restart hotkeys with new shortcuts (when running).
-        if self._hotkeys_started:
-            self.hotkeys.stop()
-            self._setup_hotkeys()
+        # Restart hotkeys with new shortcuts
+        self.hotkeys.stop()
+        self._setup_hotkeys()
