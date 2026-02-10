@@ -613,6 +613,26 @@ class _PynputHotkeyListener:
         if self._listener is not None:
             self.stop()
 
+        # On macOS, verify the process is trusted before creating the
+        # listener.  pynput's Quartz backend will segfault if
+        # CGEventTapCreate returns NULL (untrusted process).
+        if _SYSTEM == "Darwin":
+            try:
+                import ctypes, ctypes.util
+                app_svc = ctypes.cdll.LoadLibrary(
+                    "/System/Library/Frameworks/ApplicationServices.framework"
+                    "/ApplicationServices"
+                )
+                app_svc.AXIsProcessTrusted.restype = ctypes.c_bool
+                if not app_svc.AXIsProcessTrusted():
+                    log.warning(
+                        "Process is not trusted for Accessibility — "
+                        "skipping pynput listener to avoid segfault"
+                    )
+                    return
+            except Exception:
+                pass  # can't check — proceed cautiously
+
         self._listener = keyboard.Listener(
             on_press=self._on_press,
             on_release=self._on_release,

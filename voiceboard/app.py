@@ -244,16 +244,27 @@ class VoiceBoardApp:
         self.transcriber.on_text = lambda text, bs: self.window.signals.transcription_text.emit(text, bs)
         self.transcriber.on_error = lambda err: self.window.signals.transcription_error.emit(err)
 
-        # Setup hotkeys
-        self._setup_hotkeys()
-
-        # Warn about missing Accessibility permission on macOS
+        # On macOS, check accessibility BEFORE starting pynput — pynput's
+        # CGEventTap will segfault if the process is not trusted.
+        self._macos_accessible = True
         if not _check_macos_accessibility():
+            self._macos_accessible = False
             self.window.show_warning(
                 "⚠️ <b>Accessibility permission required</b><br>"
                 "Global hotkeys won't work until VoiceBoard is allowed in "
                 "<b>System Settings → Privacy &amp; Security → Accessibility</b>."
             )
+
+        # Setup hotkeys (skipped on macOS when untrusted — retried by timer)
+        if self._macos_accessible:
+            self._setup_hotkeys()
+        elif platform.system() == "Darwin":
+            # Poll for accessibility permission every 3 seconds; start
+            # hotkeys as soon as the user grants access.
+            self._accessibility_timer = QTimer()
+            self._accessibility_timer.setInterval(3000)
+            self._accessibility_timer.timeout.connect(self._retry_accessibility)
+            self._accessibility_timer.start()
 
         # Start/stop microphone preview when settings page opens/closes
         self.window.settings_page.opened.connect(self._on_settings_opened)
@@ -298,6 +309,17 @@ class VoiceBoardApp:
         """Stop mic preview when leaving the settings page."""
         if not self._recording:
             self._stop_mic_preview()
+
+    def _retry_accessibility(self) -> None:
+        """Periodically re-check macOS Accessibility permission.
+
+        Once granted, start global hotkeys and hide the warning banner.
+        """
+        if _check_macos_accessibility():
+            self._macos_accessible = True
+            self._accessibility_timer.stop()
+            self.window.hide_warning()
+            self._setup_hotkeys()
 
     def _refresh_mic_list(self) -> None:
         """Re-scan audio input devices and update the UI dropdown."""

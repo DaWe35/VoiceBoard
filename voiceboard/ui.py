@@ -103,7 +103,7 @@ STYLESHEET = """
 QMainWindow, QWidget {
     background-color: #1a1a2e;
     color: #e0e0e0;
-    font-family: 'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif;
+    font-family: '.AppleSystemUIFont', 'Helvetica Neue', 'Segoe UI', sans-serif;
     font-size: 13px;
 }
 
@@ -775,7 +775,7 @@ class SettingsPage(QWidget):
         header_row.addWidget(self.back_btn)
 
         header = QLabel("Settings")
-        header.setFont(QFont("SF Pro Display", 18, QFont.Bold))
+        header.setFont(QFont(".AppleSystemUIFont", 18, QFont.Bold))
         header.setStyleSheet("color: #6C63FF;")
         header.setAlignment(Qt.AlignCenter)
         header_row.addWidget(header, 1)
@@ -1005,7 +1005,7 @@ class MainWindow(QMainWindow):
         # ── Header ──
         header = QLabel("VoiceBoard")
         header.setAlignment(Qt.AlignCenter)
-        header.setFont(QFont("SF Pro Display", 22, QFont.Bold))
+        header.setFont(QFont(".AppleSystemUIFont", 22, QFont.Bold))
         header.setStyleSheet("color: #6C63FF; margin-bottom: 4px;")
         layout.addWidget(header)
 
