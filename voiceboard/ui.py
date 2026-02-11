@@ -23,11 +23,76 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QScrollArea,
     QFrame,
+    QCompleter,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QObject, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence
 
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
+
+
+SUPPORTED_LANGUAGE_CHOICES: list[tuple[str, str]] = [
+    ("Afrikaans", "af"),
+    ("Albanian", "sq"),
+    ("Arabic", "ar"),
+    ("Azerbaijani", "az"),
+    ("Basque", "eu"),
+    ("Belarusian", "be"),
+    ("Bengali", "bn"),
+    ("Bosnian", "bs"),
+    ("Bulgarian", "bg"),
+    ("Catalan", "ca"),
+    ("Chinese", "zh"),
+    ("Croatian", "hr"),
+    ("Czech", "cs"),
+    ("Danish", "da"),
+    ("Dutch", "nl"),
+    ("English", "en"),
+    ("Estonian", "et"),
+    ("Finnish", "fi"),
+    ("French", "fr"),
+    ("Galician", "gl"),
+    ("German", "de"),
+    ("Greek", "el"),
+    ("Gujarati", "gu"),
+    ("Hebrew", "he"),
+    ("Hindi", "hi"),
+    ("Hungarian", "hu"),
+    ("Indonesian", "id"),
+    ("Italian", "it"),
+    ("Japanese", "ja"),
+    ("Kannada", "kn"),
+    ("Kazakh", "kk"),
+    ("Korean", "ko"),
+    ("Latvian", "lv"),
+    ("Lithuanian", "lt"),
+    ("Macedonian", "mk"),
+    ("Malay", "ms"),
+    ("Malayalam", "ml"),
+    ("Marathi", "mr"),
+    ("Norwegian", "no"),
+    ("Persian", "fa"),
+    ("Polish", "pl"),
+    ("Portuguese", "pt"),
+    ("Punjabi", "pa"),
+    ("Romanian", "ro"),
+    ("Russian", "ru"),
+    ("Serbian", "sr"),
+    ("Slovak", "sk"),
+    ("Slovenian", "sl"),
+    ("Spanish", "es"),
+    ("Swahili", "sw"),
+    ("Swedish", "sv"),
+    ("Tagalog", "tl"),
+    ("Tamil", "ta"),
+    ("Telugu", "te"),
+    ("Thai", "th"),
+    ("Turkish", "tr"),
+    ("Ukrainian", "uk"),
+    ("Urdu", "ur"),
+    ("Vietnamese", "vi"),
+    ("Welsh", "cy"),
+]
 
 
 _COPY_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
@@ -722,6 +787,7 @@ class SettingsPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._language_name_to_code = {name.lower(): code for name, code in SUPPORTED_LANGUAGE_CHOICES}
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -896,11 +962,17 @@ class SettingsPage(QWidget):
 
         self.language_input = QComboBox()
         self.language_input.setEditable(True)
-        self.language_input.addItems([
-            "", "en", "es", "fr", "de", "it", "pt", "nl", "ru", "zh",
-            "ja", "ko", "ar", "hi", "pl", "uk", "cs", "sv", "da", "fi",
-        ])
-        self.language_input.setCurrentText("")
+        self.language_input.setInsertPolicy(QComboBox.NoInsert)
+        self.language_input.addItem("Auto-detect", userData="")
+        for language_name, language_code in SUPPORTED_LANGUAGE_CHOICES:
+            self.language_input.addItem(f"{language_name} ({language_code})", userData=language_code)
+        self.language_input.setCurrentIndex(0)
+        self.language_input.setMaxVisibleItems(14)
+        language_completer = QCompleter(self.language_input.model(), self.language_input)
+        language_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        language_completer.setFilterMode(Qt.MatchContains)
+        language_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.language_input.setCompleter(language_completer)
         self.language_input.lineEdit().setPlaceholderText("Auto-detect")
         options_layout.addRow("Language:", self.language_input)
 
@@ -957,12 +1029,41 @@ class SettingsPage(QWidget):
         else:
             label.hide()
 
+    def _parse_language_code(self, text: str) -> str:
+        """Resolve combo display text or code input to a valid language code."""
+        cleaned = text.strip()
+        if not cleaned or cleaned.lower() == "auto-detect":
+            return ""
+
+        lowered = cleaned.lower()
+        if lowered in self._language_name_to_code.values():
+            return lowered
+
+        if lowered in self._language_name_to_code:
+            return self._language_name_to_code[lowered]
+
+        if cleaned.endswith(")") and "(" in cleaned:
+            maybe_code = cleaned.rsplit("(", 1)[1].rstrip(")").strip().lower()
+            if maybe_code in self._language_name_to_code.values():
+                return maybe_code
+
+        return ""
+
+    def _set_language_code(self, code: str) -> None:
+        """Select a language by code, falling back to auto-detect."""
+        normalized = code.strip().lower()
+        for i in range(self.language_input.count()):
+            if (self.language_input.itemData(i) or "") == normalized:
+                self.language_input.setCurrentIndex(i)
+                return
+        self.language_input.setCurrentIndex(0)
+
     def load_config(self, config) -> None:
         """Populate settings fields from config object."""
         self.api_key_input.setText(config.soniox_api_key)
         self.toggle_input.set_shortcut_string(config.toggle_shortcut)
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
-        self.language_input.setCurrentText(config.language)
+        self._set_language_code(config.language)
         self.auto_start_cb.setChecked(config.auto_start)
 
         # Show warnings if needed for loaded shortcuts
@@ -974,7 +1075,11 @@ class SettingsPage(QWidget):
         config.soniox_api_key = self.api_key_input.text().strip()
         config.toggle_shortcut = self.toggle_input.shortcut_string()
         config.ptt_shortcut = self.ptt_input.shortcut_string()
-        config.language = self.language_input.currentText().strip()
+        current_code = (self.language_input.currentData() or "").strip().lower()
+        if current_code:
+            config.language = current_code
+        else:
+            config.language = self._parse_language_code(self.language_input.currentText())
         config.auto_start = self.auto_start_cb.isChecked()
         config.input_device = self.selected_device_index()
 
