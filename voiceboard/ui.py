@@ -772,7 +772,7 @@ class SignalBridge(QObject):
     toggle_signal = Signal()
     ptt_press_signal = Signal()
     ptt_release_signal = Signal()
-    transcription_text = Signal(str, int)  # (text, backspace_count)
+    transcription_text = Signal(str, int, bool, str)  # (text, backspace_count, has_final, final_text)
     transcription_error = Signal(str)
     audio_level = Signal(float)
     status_update = Signal(str)
@@ -976,6 +976,18 @@ class SettingsPage(QWidget):
         self.language_input.lineEdit().setPlaceholderText("Auto-detect")
         options_layout.addRow("Language:", self.language_input)
 
+        self.typing_mode_combo = QComboBox()
+        self.typing_mode_combo.addItem("Realtime typing", userData="realtime")
+        self.typing_mode_combo.addItem(
+            "Slow typing (use if realtime lags)",
+            userData="slow",
+        )
+        self.typing_mode_combo.addItem(
+            "Typing off",
+            userData="none",
+        )
+        options_layout.addRow("Typing:", self.typing_mode_combo)
+
         self.auto_start_cb = QCheckBox("Launch on system startup")
         options_layout.addRow(self.auto_start_cb)
 
@@ -1058,6 +1070,15 @@ class SettingsPage(QWidget):
                 return
         self.language_input.setCurrentIndex(0)
 
+    def _set_typing_mode(self, mode: str) -> None:
+        """Select typing mode by value (realtime, slow, none)."""
+        normalized = (mode or "realtime").strip().lower()
+        for i in range(self.typing_mode_combo.count()):
+            if (self.typing_mode_combo.itemData(i) or "") == normalized:
+                self.typing_mode_combo.setCurrentIndex(i)
+                return
+        self.typing_mode_combo.setCurrentIndex(0)
+
     def load_config(self, config) -> None:
         """Populate settings fields from config object."""
         self.api_key_input.setText(config.soniox_api_key)
@@ -1065,6 +1086,7 @@ class SettingsPage(QWidget):
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
         self._set_language_code(config.language)
         self.auto_start_cb.setChecked(config.auto_start)
+        self._set_typing_mode(config.typing_mode)
 
         # Show warnings if needed for loaded shortcuts
         self._update_shortcut_warning(config.toggle_shortcut, self._toggle_warn)
@@ -1081,6 +1103,7 @@ class SettingsPage(QWidget):
         else:
             config.language = self._parse_language_code(self.language_input.currentText())
         config.auto_start = self.auto_start_cb.isChecked()
+        config.typing_mode = self.typing_mode_combo.currentData() or "realtime"
         config.input_device = self.selected_device_index()
 
 
@@ -1263,6 +1286,7 @@ class MainWindow(QMainWindow):
         self.ptt_input = self.settings_page.ptt_input
         self.language_input = self.settings_page.language_input
         self.auto_start_cb = self.settings_page.auto_start_cb
+        self.typing_mode_combo = self.settings_page.typing_mode_combo
         self.mic_combo = self.settings_page.mic_combo
         self.mic_refresh_btn = self.settings_page.mic_refresh_btn
         self.audio_level = self.settings_page.audio_level
@@ -1273,7 +1297,7 @@ class MainWindow(QMainWindow):
 
     def _show_settings(self) -> None:
         """Switch to the settings page."""
-        self.setMinimumSize(420, 700)
+        self.setMinimumSize(500, 700)
         self._stack.setCurrentIndex(1)
         self.settings_page.opened.emit()
 

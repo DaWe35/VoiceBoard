@@ -229,6 +229,7 @@ class VoiceBoardApp:
         self.window.language_input.activated.connect(self._schedule_save)
         self.window.language_input.lineEdit().editingFinished.connect(self._schedule_save)
         self.window.auto_start_cb.stateChanged.connect(self._schedule_save)
+        self.window.typing_mode_combo.currentIndexChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._on_mic_changed)
 
@@ -246,7 +247,7 @@ class VoiceBoardApp:
         self.recorder.on_audio_chunk = self._on_audio_chunk
 
         # Transcriber callbacks — emit Qt signals for thread safety
-        self.transcriber.on_text = lambda text, bs: self.window.signals.transcription_text.emit(text, bs)
+        self.transcriber.on_text = lambda text, bs, has_final, final_text: self.window.signals.transcription_text.emit(text, bs, has_final, final_text)
         self.transcriber.on_error = lambda err: self.window.signals.transcription_error.emit(err)
 
         # On macOS, check accessibility BEFORE starting pynput — pynput's
@@ -432,7 +433,13 @@ class VoiceBoardApp:
         """Forward audio chunk from the recorder to the transcriber."""
         self.transcriber.send_audio(pcm_bytes)
 
-    def _on_transcription_text(self, text: str, backspace_count: int) -> None:
+    def _on_transcription_text(
+        self,
+        text: str,
+        backspace_count: int,
+        has_final: bool = True,
+        final_text: str = "",
+    ) -> None:
         """Handle transcription text — correct non-final text and type new text.
 
         *backspace_count* characters of previously typed non-final text are
@@ -440,10 +447,21 @@ class VoiceBoardApp:
 
         Typing is skipped when the VoiceBoard window itself is focused to
         avoid injecting keystrokes into our own UI (which can crash the app).
+        Respects typing_mode: realtime (always type, with backspaces); slow
+        (only type final text, no backspaces); none (never type).
         """
         self.window.update_live_text(text, backspace_count)
-        if not self.window.isActiveWindow():
-            enqueue_text(text, backspace_count)
+        if self.window.isActiveWindow():
+            return
+        mode = getattr(self.config, "typing_mode", "realtime")
+        if mode == "none":
+            return
+        if mode == "slow":
+            if not has_final or not final_text:
+                return
+            enqueue_text(final_text, 0)
+            return
+        enqueue_text(text, backspace_count)
 
     def _on_transcription_error(self, error: str) -> None:
         """Handle transcription error."""

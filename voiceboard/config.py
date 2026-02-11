@@ -31,6 +31,8 @@ class AppConfig:
     language: str = ""
     input_device: str = ""  # empty = system default
     auto_start: bool = False
+    # typing_mode: "realtime" | "slow" | "none"
+    typing_mode: str = "realtime"
 
     def save(self) -> None:
         """Persist config to disk."""

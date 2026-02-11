@@ -35,8 +35,10 @@ class RealtimeTranscriber:
       - Final tokens are confirmed — they replace the provisional text.
 
     Callbacks:
-      - ``on_text(text, backspace_count)`` — type *text* after deleting
-        *backspace_count* characters of previously typed non-final text.
+      - ``on_text(text, backspace_count, has_final, final_text)`` — type
+        *text* after deleting *backspace_count* characters of previously
+        typed non-final text. *has_final* is True when this batch includes
+        confirmed final tokens; *final_text* is the confirmed text only.
       - ``on_error(msg)`` — an error occurred.
     """
 
@@ -49,7 +51,7 @@ class RealtimeTranscriber:
         self._language = language
 
         # Callbacks — set by the app layer
-        self.on_text: Optional[Callable[[str, int], None]] = None
+        self.on_text: Optional[Callable[[str, int, bool, str], None]] = None
         self.on_error: Optional[Callable[[str], None]] = None
 
         # Internal state
@@ -308,7 +310,7 @@ class RealtimeTranscriber:
             print(f"[{now}] bs={backspace_count} final='{final_text}' nonfinal='{nonfinal_text}'")
 
             if self.on_text:
-                self.on_text(new_text, backspace_count)
+                self.on_text(new_text, backspace_count, bool(final_text), final_text)
 
         # Update tracking: only the non-final portion remains "provisional"
         self._nonfinal_typed_text = nonfinal_text
