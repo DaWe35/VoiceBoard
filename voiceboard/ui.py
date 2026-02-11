@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QCompleter,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QObject, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence
+from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QPainter, QColor, QPen, QKeySequence, QWheelEvent
 
 from voiceboard.resources import TRAY_ICON_SVG, TRAY_ICON_RECORDING_SVG
 
@@ -161,6 +161,13 @@ def svg_to_icon(svg_str: str) -> QIcon:
     renderer.render(painter)
     painter.end()
     return QIcon(pixmap)
+
+
+class ScrollSafeComboBox(QComboBox):
+    """ComboBox that ignores wheel events so scrolling the page does not change the selection."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
 
 
 # Stylesheet for the entire application — modern dark theme
@@ -926,7 +933,7 @@ class SettingsPage(QWidget):
 
         form = QFormLayout()
         mic_row = QHBoxLayout()
-        self.mic_combo = QComboBox()
+        self.mic_combo = ScrollSafeComboBox()
         self.mic_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         mic_row.addWidget(self.mic_combo)
 
@@ -960,7 +967,7 @@ class SettingsPage(QWidget):
         options_layout = QFormLayout()
         options_layout.setSpacing(10)
 
-        self.language_input = QComboBox()
+        self.language_input = ScrollSafeComboBox()
         self.language_input.setEditable(True)
         self.language_input.setInsertPolicy(QComboBox.NoInsert)
         self.language_input.addItem("Auto-detect", userData="")
@@ -976,7 +983,7 @@ class SettingsPage(QWidget):
         self.language_input.lineEdit().setPlaceholderText("Auto-detect")
         options_layout.addRow("Language:", self.language_input)
 
-        self.translation_language_input = QComboBox()
+        self.translation_language_input = ScrollSafeComboBox()
         self.translation_language_input.setEditable(True)
         self.translation_language_input.setInsertPolicy(QComboBox.NoInsert)
         self.translation_language_input.addItem("No translation", userData="")
@@ -996,7 +1003,7 @@ class SettingsPage(QWidget):
         self.translation_language_input.lineEdit().setPlaceholderText("No translation")
         options_layout.addRow("Translation language:", self.translation_language_input)
 
-        self.typing_mode_combo = QComboBox()
+        self.typing_mode_combo = ScrollSafeComboBox()
         self.typing_mode_combo.addItem("Realtime typing", userData="realtime")
         self.typing_mode_combo.addItem(
             "Slow typing (use if realtime lags)",
