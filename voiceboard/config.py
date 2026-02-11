@@ -29,6 +29,7 @@ class AppConfig:
     toggle_shortcut: str = "<alt>+x"
     ptt_shortcut: str = "<f8>"
     language: str = ""
+    translation_language: str = ""  # empty = no translation (one-way target)
     input_device: str = ""  # empty = system default
     auto_start: bool = False
     # typing_mode: "realtime" | "slow" | "none"

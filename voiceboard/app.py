@@ -161,6 +161,7 @@ class VoiceBoardApp:
         self.transcriber = RealtimeTranscriber(
             api_key=self.config.soniox_api_key,
             language=self.config.language,
+            translation_language=getattr(self.config, "translation_language", "") or "",
         )
         self.hotkeys = HotkeyManager()
         self._recording = False
@@ -228,6 +229,10 @@ class VoiceBoardApp:
         # keystroke while searching the language dropdown.
         self.window.language_input.activated.connect(self._schedule_save)
         self.window.language_input.lineEdit().editingFinished.connect(self._schedule_save)
+        self.window.translation_language_input.activated.connect(self._schedule_save)
+        self.window.translation_language_input.lineEdit().editingFinished.connect(
+            self._schedule_save
+        )
         self.window.auto_start_cb.stateChanged.connect(self._schedule_save)
         self.window.typing_mode_combo.currentIndexChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)
@@ -482,6 +487,9 @@ class VoiceBoardApp:
         # Update transcriber with new settings
         self.transcriber.update_api_key(self.config.soniox_api_key)
         self.transcriber.update_language(self.config.language)
+        self.transcriber.update_translation_language(
+            getattr(self.config, "translation_language", "") or ""
+        )
 
         # Sync OS auto-start with the config setting
         set_autostart(self.config.auto_start)

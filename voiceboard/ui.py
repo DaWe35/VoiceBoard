@@ -976,6 +976,26 @@ class SettingsPage(QWidget):
         self.language_input.lineEdit().setPlaceholderText("Auto-detect")
         options_layout.addRow("Language:", self.language_input)
 
+        self.translation_language_input = QComboBox()
+        self.translation_language_input.setEditable(True)
+        self.translation_language_input.setInsertPolicy(QComboBox.NoInsert)
+        self.translation_language_input.addItem("No translation", userData="")
+        for language_name, language_code in SUPPORTED_LANGUAGE_CHOICES:
+            self.translation_language_input.addItem(
+                f"{language_name} ({language_code})", userData=language_code
+            )
+        self.translation_language_input.setCurrentIndex(0)
+        self.translation_language_input.setMaxVisibleItems(14)
+        translation_completer = QCompleter(
+            self.translation_language_input.model(), self.translation_language_input
+        )
+        translation_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        translation_completer.setFilterMode(Qt.MatchContains)
+        translation_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.translation_language_input.setCompleter(translation_completer)
+        self.translation_language_input.lineEdit().setPlaceholderText("No translation")
+        options_layout.addRow("Translation language:", self.translation_language_input)
+
         self.typing_mode_combo = QComboBox()
         self.typing_mode_combo.addItem("Realtime typing", userData="realtime")
         self.typing_mode_combo.addItem(
@@ -1070,6 +1090,25 @@ class SettingsPage(QWidget):
                 return
         self.language_input.setCurrentIndex(0)
 
+    def _parse_translation_code(self, text: str) -> str:
+        """Resolve translation combo text to a valid language code (empty = no translation)."""
+        cleaned = text.strip()
+        if not cleaned or cleaned.lower() in ("no translation", "auto-detect"):
+            return ""
+        return self._parse_language_code(text)
+
+    def _set_translation_language(self, code: str) -> None:
+        """Select translation language by code, falling back to no translation."""
+        normalized = (code or "").strip().lower()
+        if not normalized:
+            self.translation_language_input.setCurrentIndex(0)
+            return
+        for i in range(self.translation_language_input.count()):
+            if (self.translation_language_input.itemData(i) or "") == normalized:
+                self.translation_language_input.setCurrentIndex(i)
+                return
+        self.translation_language_input.setCurrentIndex(0)
+
     def _set_typing_mode(self, mode: str) -> None:
         """Select typing mode by value (realtime, slow, none)."""
         normalized = (mode or "realtime").strip().lower()
@@ -1085,6 +1124,7 @@ class SettingsPage(QWidget):
         self.toggle_input.set_shortcut_string(config.toggle_shortcut)
         self.ptt_input.set_shortcut_string(config.ptt_shortcut)
         self._set_language_code(config.language)
+        self._set_translation_language(getattr(config, "translation_language", "") or "")
         self.auto_start_cb.setChecked(config.auto_start)
         self._set_typing_mode(config.typing_mode)
 
@@ -1102,6 +1142,13 @@ class SettingsPage(QWidget):
             config.language = current_code
         else:
             config.language = self._parse_language_code(self.language_input.currentText())
+        trans_code = (self.translation_language_input.currentData() or "").strip().lower()
+        if trans_code:
+            config.translation_language = trans_code
+        else:
+            config.translation_language = self._parse_translation_code(
+                self.translation_language_input.currentText()
+            )
         config.auto_start = self.auto_start_cb.isChecked()
         config.typing_mode = self.typing_mode_combo.currentData() or "realtime"
         config.input_device = self.selected_device_index()
@@ -1285,6 +1332,7 @@ class MainWindow(QMainWindow):
         self.toggle_input = self.settings_page.toggle_input
         self.ptt_input = self.settings_page.ptt_input
         self.language_input = self.settings_page.language_input
+        self.translation_language_input = self.settings_page.translation_language_input
         self.auto_start_cb = self.settings_page.auto_start_cb
         self.typing_mode_combo = self.settings_page.typing_mode_combo
         self.mic_combo = self.settings_page.mic_combo

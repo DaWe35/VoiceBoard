@@ -46,9 +46,11 @@ class RealtimeTranscriber:
         self,
         api_key: str,
         language: str = "",
+        translation_language: str = "",
     ):
         self._api_key = api_key
         self._language = language
+        self._translation_language = translation_language or ""
 
         # Callbacks — set by the app layer
         self.on_text: Optional[Callable[[str, int, bool, str], None]] = None
@@ -72,6 +74,9 @@ class RealtimeTranscriber:
 
     def update_language(self, language: str) -> None:
         self._language = language
+
+    def update_translation_language(self, translation_language: str) -> None:
+        self._translation_language = (translation_language or "").strip()
 
     @property
     def is_connected(self) -> bool:
@@ -228,6 +233,14 @@ class RealtimeTranscriber:
         if self._language:
             config["language_hints"] = [self._language]
 
+        # Real-time translation: one-way into target language when set.
+        # See: https://soniox.com/docs/stt/rt/real-time-translation
+        if self._translation_language:
+            config["translation"] = {
+                "type": "one_way",
+                "target_language": self._translation_language,
+            }
+
         await ws.send(json.dumps(config))
 
     async def _listen(self, ws) -> None:
@@ -261,16 +274,34 @@ class RealtimeTranscriber:
         """Handle a batch of tokens from the server.
 
         Strategy:
-        1. Collect final tokens and non-final tokens from this response.
-        2. Final tokens: backspace over previously typed non-final text,
+        1. When translation is on, only emit tokens with translation_status
+           "translation" (the translated text). When off, emit all tokens.
+        2. Collect final tokens and non-final tokens from this response.
+        3. Final tokens: backspace over previously typed non-final text,
            then type the final text.  This "corrects" the provisional text.
-        3. Non-final tokens: type them as provisional feedback, remembering
+        4. Non-final tokens: type them as provisional feedback, remembering
            what was typed so we can backspace later.
         """
         final_text_parts: list[str] = []
         nonfinal_text_parts: list[str] = []
 
+        use_translation = bool(self._translation_language)
+        target_lang = (self._translation_language or "").strip().lower()
+
         for token in tokens:
+            # When translation is enabled: type "translation" tokens (translated
+            # text), and also "original"/"none" tokens when the spoken language
+            # equals the target (no translation produced — e.g. speaking Hungarian
+            # with target Hungarian).
+            if use_translation:
+                status = token.get("translation_status") or ""
+                if status == "translation":
+                    pass  # include
+                elif status in ("original", "none"):
+                    if (token.get("language") or "").strip().lower() != target_lang:
+                        continue  # different language → wait for translation
+                else:
+                    continue  # unknown status when translation on
             text = token.get("text", "")
             if not text:
                 continue
