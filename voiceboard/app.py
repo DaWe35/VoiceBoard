@@ -455,6 +455,12 @@ class VoiceBoardApp:
         # Sync OS auto-start with the config setting
         set_autostart(self.config.auto_start)
 
-        # Restart hotkeys with new shortcuts
-        self.hotkeys.stop()
-        self._setup_hotkeys()
+        # Restart hotkeys with new shortcuts (skip on macOS when
+        # Accessibility permission has not been granted yet — pynput
+        # will segfault if we try to create a CGEventTap).
+        try:
+            self.hotkeys.stop()
+            if self._macos_accessible:
+                self._setup_hotkeys()
+        except Exception:
+            pass  # don't let a hotkey error crash the app

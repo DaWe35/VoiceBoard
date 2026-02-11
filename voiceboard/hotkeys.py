@@ -646,6 +646,10 @@ class _PynputHotkeyListener:
     def stop(self) -> None:
         if self._listener:
             self._listener.stop()
+            try:
+                self._listener.join(timeout=2)
+            except Exception:
+                pass
             self._listener = None
         self._current_keys.clear()
         self._toggle_seq.reset()
