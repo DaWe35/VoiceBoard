@@ -224,7 +224,10 @@ class VoiceBoardApp:
         self.window.toggle_input.capture_ended.connect(self.hotkeys.resume)
         self.window.ptt_input.capture_started.connect(self.hotkeys.suspend)
         self.window.ptt_input.capture_ended.connect(self.hotkeys.resume)
-        self.window.language_input.currentTextChanged.connect(self._schedule_save)
+        # Avoid triggering expensive settings save/hotkey restart on every
+        # keystroke while searching the language dropdown.
+        self.window.language_input.activated.connect(self._schedule_save)
+        self.window.language_input.lineEdit().editingFinished.connect(self._schedule_save)
         self.window.auto_start_cb.stateChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._on_mic_changed)
@@ -452,6 +455,9 @@ class VoiceBoardApp:
 
     def _on_save(self) -> None:
         """Save settings from UI to config file (called automatically on change)."""
+        previous_toggle = self.config.toggle_shortcut
+        previous_ptt = self.config.ptt_shortcut
+
         self.window.save_to_config(self.config)
         self.config.save()
 
@@ -462,12 +468,18 @@ class VoiceBoardApp:
         # Sync OS auto-start with the config setting
         set_autostart(self.config.auto_start)
 
-        # Restart hotkeys with new shortcuts (skip on macOS when
-        # Accessibility permission has not been granted yet — pynput
-        # will segfault if we try to create a CGEventTap).
-        try:
-            self.hotkeys.stop()
-            if self._macos_accessible:
-                self._setup_hotkeys()
-        except Exception:
-            pass  # don't let a hotkey error crash the app
+        # Restart hotkeys only when shortcuts changed. Re-registering on
+        # every unrelated settings save causes unnecessary UI hiccups.
+        shortcuts_changed = (
+            self.config.toggle_shortcut != previous_toggle
+            or self.config.ptt_shortcut != previous_ptt
+        )
+        if shortcuts_changed:
+            # Skip on macOS when Accessibility permission has not been granted
+            # yet — pynput will segfault if we try to create a CGEventTap.
+            try:
+                self.hotkeys.stop()
+                if self._macos_accessible:
+                    self._setup_hotkeys()
+            except Exception:
+                pass  # don't let a hotkey error crash the app
