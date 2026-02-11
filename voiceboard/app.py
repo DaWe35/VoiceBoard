@@ -217,6 +217,13 @@ class VoiceBoardApp:
         self.window.api_key_input.textChanged.connect(self._schedule_save)
         self.window.toggle_input.shortcut_changed.connect(self._schedule_save)
         self.window.ptt_input.shortcut_changed.connect(self._schedule_save)
+
+        # Suspend global hotkeys while the user is capturing a new shortcut
+        # to prevent the old hotkey from firing during capture.
+        self.window.toggle_input.capture_started.connect(self.hotkeys.suspend)
+        self.window.toggle_input.capture_ended.connect(self.hotkeys.resume)
+        self.window.ptt_input.capture_started.connect(self.hotkeys.suspend)
+        self.window.ptt_input.capture_ended.connect(self.hotkeys.resume)
         self.window.language_input.currentTextChanged.connect(self._schedule_save)
         self.window.auto_start_cb.stateChanged.connect(self._schedule_save)
         self.window.mic_combo.currentIndexChanged.connect(self._schedule_save)

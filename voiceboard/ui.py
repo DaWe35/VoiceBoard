@@ -342,6 +342,8 @@ class ShortcutCaptureInput(QLineEdit):
     """
 
     shortcut_changed = Signal(str)  # emits the config-format string
+    capture_started = Signal()       # emitted when the field starts listening
+    capture_ended = Signal()         # emitted when the field stops listening
 
     # How long (ms) to wait after all keys are released before treating
     # the chord as complete.  Gives the user time to press extra keys.
@@ -461,6 +463,7 @@ class ShortcutCaptureInput(QLineEdit):
         self._reset_capture_state()
         self.setText("Press a key combination…")
         self._update_style()
+        self.capture_started.emit()
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
@@ -471,6 +474,7 @@ class ShortcutCaptureInput(QLineEdit):
         else:
             self.setText("")
         self._update_style()
+        self.capture_ended.emit()
 
     def _key_info(self, qt_key: int, event=None) -> tuple[str, str] | None:
         """Return (display_name, config_token) for a Qt key code."""

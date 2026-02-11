@@ -299,11 +299,28 @@ class _EvdevHotkeyListener:
         self._toggle_combo_active = False
         self._ptt_combo_active = False
 
+        self._suspended = False
+
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._stop_pipe_r: Optional[int] = None
         self._stop_pipe_w: Optional[int] = None
+
+    def suspend(self) -> None:
+        """Suspend hotkey processing (events are still consumed but ignored)."""
+        with self._lock:
+            self._suspended = True
+            self._current_keys.clear()
+            self._toggle_seq.reset()
+            self._ptt_seq.reset()
+            self._toggle_combo_active = False
+            self._ptt_combo_active = False
+
+    def resume(self) -> None:
+        """Resume hotkey processing."""
+        with self._lock:
+            self._suspended = False
 
     def set_shortcuts(self, toggle_shortcut: str, ptt_shortcut: str) -> None:
         _init_modifier_pairs()
@@ -449,6 +466,8 @@ class _EvdevHotkeyListener:
         return cfg.is_combo and cfg.combo.issubset(current_keys)
 
     def _on_key_down(self, code: int) -> None:
+        if self._suspended:
+            return
         # ── Toggle shortcut ──
         if self._toggle_cfg.is_sequential:
             if self._check_seq(self._toggle_cfg, self._toggle_seq, code):
@@ -480,6 +499,8 @@ class _EvdevHotkeyListener:
                             self.on_ptt_press()
 
     def _on_key_up(self, code: int) -> None:
+        if self._suspended:
+            return
         # PTT release (combo)
         if self._ptt_combo_active and self._ptt_cfg.is_combo:
             if code in self._ptt_cfg.combo:
@@ -521,7 +542,23 @@ class _PynputHotkeyListener:
         self._ptt_seq = _SeqState()
         self._toggle_combo_active = False
         self._ptt_combo_active = False
+        self._suspended = False
         self._lock = threading.Lock()
+
+    def suspend(self) -> None:
+        """Suspend hotkey processing (listener stays active but ignores keys)."""
+        with self._lock:
+            self._suspended = True
+            self._current_keys.clear()
+            self._toggle_seq.reset()
+            self._ptt_seq.reset()
+            self._toggle_combo_active = False
+            self._ptt_combo_active = False
+
+    def resume(self) -> None:
+        """Resume hotkey processing."""
+        with self._lock:
+            self._suspended = False
 
     def _parse_shortcut(self, shortcut_str: str) -> _ShortcutConfig:
         from pynput import keyboard
@@ -700,6 +737,8 @@ class _PynputHotkeyListener:
         return cfg.is_combo and cfg.combo.issubset(current_keys)
 
     def _on_press(self, key) -> None:
+        if self._suspended:
+            return
         normalized = self._normalize_key(key)
         self._current_keys.add(normalized)
 
@@ -734,6 +773,8 @@ class _PynputHotkeyListener:
                             self.on_ptt_press()
 
     def _on_release(self, key) -> None:
+        if self._suspended:
+            return
         normalized = self._normalize_key(key)
 
         # PTT release (combo)
@@ -810,6 +851,14 @@ class HotkeyManager:
 
     def set_shortcuts(self, toggle_shortcut: str, ptt_shortcut: str) -> None:
         self._backend.set_shortcuts(toggle_shortcut, ptt_shortcut)
+
+    def suspend(self) -> None:
+        """Suspend hotkey processing (e.g. while capturing a new shortcut)."""
+        self._backend.suspend()
+
+    def resume(self) -> None:
+        """Resume hotkey processing."""
+        self._backend.resume()
 
     def start(self) -> None:
         self._backend.start()
